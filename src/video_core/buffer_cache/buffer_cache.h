@@ -176,36 +176,11 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 }
 
 template <class P>
-void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data) {
+void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size) {
     Nx2NoteListHostWrite(device_addr, size);
     if (IsRegionGpuModified(device_addr, size)) {
         ClearDownload(device_addr, size);
         gpu_modified_ranges.Subtract(device_addr, size);
-    }
-    // The tracker marks whole pages CPU-modified, which drops their GPU-modified state: GPU-written
-    // bytes elsewhere on these pages would never be downloaded, and the page's next upload would
-    // send the stale guest copy over them. Hyrule Warriors: Age of Imprisonment writes small
-    // structures next to the draw arguments its compute dispatches fill in; the draws then read
-    // leftover bytes as vertex counts. Download those bytes first (the CPU's own were subtracted
-    // above, so they aren't overwritten).
-    const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
-    const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
-    if (keep_page_gpu_data && gpu_modified_ranges.Intersects(page_begin, page_end - page_begin)) {
-        // Switch 2 titles: upload the CPU's bytes into the buffer instead, as CachedWriteMemory
-        // does, so the page stays GPU-owned and nothing waits for the host GPU.
-        static const int forced = [] {
-            const char* value = std::getenv("EDEN_NX2_INLINE_PAGE_WRITES");
-            return value == nullptr ? -1 : (value[0] == '0' ? 0 : 1);
-        }();
-        const bool inline_writes =
-            forced >= 0 ? forced == 1 : Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
-        if (inline_writes && IsRegionRegistered(device_addr, size)) {
-            tmp_buffer.resize_destructive(size);
-            device_memory.ReadBlockUnsafe(device_addr, tmp_buffer.data(), size);
-            InlineMemoryImplementation(device_addr, size, tmp_buffer);
-            return;
-        }
-        DownloadMemory(page_begin, page_end - page_begin);
     }
     memory_tracker.MarkRegionAsCpuModified(device_addr, size);
     MarkVertexBuffersStale(device_addr, size);
