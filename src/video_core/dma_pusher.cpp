@@ -80,24 +80,8 @@ bool DmaPusher::Step() {
     if (!ib_enable || dma_pushbuffer.empty()) {
         return false;
     }
-    const u64 suspensions_before = suspensions.load(std::memory_order_relaxed);
     if (!puller.ResumeAcquire(*this)) {
         return false;
-    }
-    // Lists queued while the channel waited were read from memory, not as submitted: the game
-    // writes the commands a list runs before it releases the acquire, so the words at submit time
-    // could be older. Reading them as late as the parse is too late in Hyrule Warriors: Age of
-    // Imprisonment fights: a command ring the game had already refilled for a later frame, read
-    // as this frame's commands (methods on unbound subchannels, garbage QMDs, then a channel
-    // waiting forever on a release it never got). The acquire is released now, so the commands
-    // are written and the memory not yet reused: copy them here. EDEN_NX2_RESNAPSHOT=0: off.
-    if (ResnapshotEnabled() && suspensions.load(std::memory_order_relaxed) != suspensions_before) {
-        const u64 now = suspensions.load(std::memory_order_acquire);
-        for (CommandList& list : dma_pushbuffer) {
-            if (!list.submitted_offsets.empty()) {
-                RefreshSnapshot(list, now);
-            }
-        }
     }
 
     CommandList& command_list = dma_pushbuffer.front();
@@ -106,7 +90,7 @@ bool DmaPusher::Step() {
     const size_t command_list_size = command_list.command_lists.size();
 
     if (prefetch_size == 0 && command_list_size == 0) {
-        dma_pushbuffer.pop_front();
+        dma_pushbuffer.pop();
         dma_pushbuffer_subindex = 0;
         return true;
     }
@@ -119,7 +103,7 @@ bool DmaPusher::Step() {
             return false;
         }
         command_resume_offset = 0;
-        dma_pushbuffer.pop_front();
+        dma_pushbuffer.pop();
         return true;
     }
 
@@ -204,27 +188,7 @@ bool DmaPusher::Step() {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
-        // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
-        const bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&
-                               command_list.snapshot_suspensions ==
-                                   suspensions.load(std::memory_order_acquire) &&
-                               VideoCommon::CanUseSubmittedCommands(
-            command_resume_offset != 0,
-            dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
-                !std::ranges::binary_search(command_list.deferred_entries,
-                                            static_cast<u32>(dma_pushbuffer_subindex)),
-            gpu_written,
-            use_safe && memory_manager.IsMemoryDirty(dma_state.dma_get,
-                                                     header.size * sizeof(u32)));
-        if (submitted) {
-            const std::span<const CommandHeader> commands{
-                command_list.submitted_words.data() +
-                    command_list.submitted_offsets[dma_pushbuffer_subindex],
-                header.size};
-            RecordParsedEntry(header, commands);
-            Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Submitted);
-            command_resume_offset += ProcessCommands(commands, 0);
-        } else if (use_safe) {
+        if (use_safe) {
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::SafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             RecordParsedEntry(header, commands);
@@ -269,7 +233,7 @@ bool DmaPusher::Step() {
             }
         }
         parked_methods.clear();
-        dma_pushbuffer.pop_front();
+        dma_pushbuffer.pop();
         dma_pushbuffer_subindex = 0;
     } else {
         signal_sync = command_list.command_lists[dma_pushbuffer_subindex].sync && Settings::values.sync_memory_operations.GetValue();
@@ -568,36 +532,6 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
         subchannel->CallMultiMethod(system, dma_state.method, base_start, num_methods, dma_state.method_count);
     }
-}
-
-void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
-    list.snapshot_suspensions = now;
-    for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
-        const CommandListHeader& entry = list.command_lists[i];
-        const u32 offset = list.submitted_offsets[i];
-        if (offset + entry.size > list.submitted_words.size()) {
-            continue;
-        }
-        memory_manager.ReadBlockUnsafe(entry.addr, list.submitted_words.data() + offset,
-                                       entry.size * sizeof(u32));
-    }
-    list.deferred_entries.clear();
-}
-
-void DmaPusher::RefreshDeferredEntries(CommandList& list) {
-    for (const u32 i : list.deferred_entries) {
-        if (i >= list.command_lists.size() || i >= list.submitted_offsets.size()) {
-            continue;
-        }
-        const CommandListHeader& entry = list.command_lists[i];
-        const u32 offset = list.submitted_offsets[i];
-        if (offset + entry.size > list.submitted_words.size()) {
-            continue;
-        }
-        memory_manager.ReadBlockUnsafe(entry.addr, list.submitted_words.data() + offset,
-                                       entry.size * sizeof(u32));
-    }
-    list.deferred_entries.clear();
 }
 
 bool DmaPusher::IsGpuWrittenCommands(GPUVAddr address, size_t size) {
