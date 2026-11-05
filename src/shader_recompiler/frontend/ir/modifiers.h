@@ -40,6 +40,7 @@ union TextureInstInfo {
     BitField<16, 3, TextureType> type;
     BitField<19, 1, u32> is_depth;
     BitField<20, 1, u32> has_bias;
+    BitField<20, 1, u32> image_coherent;
     BitField<21, 1, u32> has_lod_clamp;
     BitField<22, 1, u32> relaxed_precision;
     BitField<23, 2, u32> gather_component;
