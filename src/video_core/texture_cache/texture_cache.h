@@ -254,9 +254,7 @@ void TextureCache<P>::RunGarbageCollector() {
 
 template <class P>
 void TextureCache<P>::ApplyThresholdOverrides(bool log) {
-    // On every GPU: past what a frame needs, more device memory only keeps the textures of earlier
-    // scenes (title 1 filled 6.7 GB of an 8 GB card and draws its races in ~5 GB), so collect from
-    // MaxCriticalMemory on rather than near the card's budget.
+    // Cap the threshold while retaining the lower limits calculated from the device budget.
     critical_memory = (std::min)(critical_memory, MaxCriticalMemory);
     expected_memory =
         (std::min)(expected_memory, critical_memory - (std::min)(critical_memory, u64{768_MiB}));
@@ -447,7 +445,10 @@ void TextureCache<P>::TickFrame() {
         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
         images_created = images_deleted = 0;
     }
-    if (total_used_memory > minimum_memory) {
+    // Native titles frequently reuse textures after 50 frames. Keep them while the device is
+    // below its pressure threshold instead of evicting and uploading them repeatedly.
+    const u64 collection_threshold = native_thresholds_applied ? expected_memory : minimum_memory;
+    if (total_used_memory > collection_threshold) {
         RunGarbageCollector();
     }
     sentenced_images.Tick();
