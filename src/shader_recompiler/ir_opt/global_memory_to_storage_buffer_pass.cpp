@@ -816,6 +816,7 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
 }
 
 void JoinStorageInfo(Info& base, Info& source) {
+    base.requires_coherent_global_memory |= source.requires_coherent_global_memory;
     base.native_global_bounds |= source.native_global_bounds;
     auto& descriptors = base.storage_buffers_descriptors;
     for (auto& desc : source.storage_buffers_descriptors) {

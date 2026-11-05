@@ -1377,6 +1377,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
 }
 
 void JoinTextureInfo(Info& base, Info& source) {
+    base.requires_coherent_image_memory |= source.requires_coherent_image_memory;
     Descriptors descriptors{
         base.texture_buffer_descriptors,
         base.image_buffer_descriptors,
