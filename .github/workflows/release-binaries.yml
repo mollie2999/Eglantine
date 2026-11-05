@@ -572,6 +572,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
       - name: Download binaries
         uses: actions/download-artifact@v7
         with:
