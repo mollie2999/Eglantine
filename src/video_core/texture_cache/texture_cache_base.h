@@ -150,7 +150,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     static constexpr s64 DEFAULT_CRITICAL_MEMORY = 1_GiB + 625_MiB;
     /// The most device memory the collector lets the cache fill before it collects in earnest,
     /// on every GPU (ApplyThresholdOverrides).
-    static constexpr u64 MaxCriticalMemory = 5_GiB;
+    static constexpr u64 MaxCriticalMemory = 10_GiB;
     static constexpr size_t GC_EMERGENCY_COUNTS = 2;
 
     using Runtime = typename P::Runtime;
