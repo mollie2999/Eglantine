@@ -104,12 +104,12 @@ static Shader::TexturePixelFormat ConvertTexturePixelFormat(const Tegra::Texture
 // is bound as that null view, so arbitrary bytes after the pool must not reach the compiler.
 static Tegra::Texture::TICEntry NullTextureInfo() {
     Tegra::Texture::TICEntry entry{};
-    entry.format = Tegra::Texture::TextureFormat::A8B8G8R8;
-    entry.r_type = Tegra::Texture::ComponentType::UNORM;
-    entry.g_type = Tegra::Texture::ComponentType::UNORM;
-    entry.b_type = Tegra::Texture::ComponentType::UNORM;
-    entry.a_type = Tegra::Texture::ComponentType::UNORM;
-    entry.texture_type = Tegra::Texture::TextureType::Texture2D;
+    entry.format.Assign(Tegra::Texture::TextureFormat::A8B8G8R8);
+    entry.r_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.g_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.b_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.a_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.texture_type.Assign(Tegra::Texture::TextureType::Texture2D);
     return entry;
 }
 
