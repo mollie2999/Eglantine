@@ -38,6 +38,7 @@ add_executable(tests
     video_core/native_macro_fifo.cpp
     video_core/uniform_stream_reuse.cpp
     video_core/shader_invalidation.cpp
+    video_core/shader_environment.cpp
     video_core/descriptor_table.cpp
     input_common/calibration_configuration_job.cpp
 )
