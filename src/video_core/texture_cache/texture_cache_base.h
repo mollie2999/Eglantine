@@ -543,7 +543,6 @@ private:
     u64 last_feedback_loop_serial = 0;
     u64 last_feedback_texture_serial = 0;
     bool last_feedback_loop_result = false;
-    bool feedback_depth_dirty = true;
     FramebufferId last_framebuffer_id{};
     u64 last_framebuffer_serial = 0;
 
