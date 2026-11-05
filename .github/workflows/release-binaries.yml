@@ -17,6 +17,7 @@ on:
     branches:
       - nx2
       - nx2-experimental
+      - exp
     # A binary only changes when build inputs change; docs-only pushes skip the build.
     paths:
       - "src/**"
@@ -85,6 +86,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Install Linux dependencies
         if: startsWith(matrix.platform, 'linux')
@@ -611,7 +614,10 @@ jobs:
           PATCH_NOTES: ${{ inputs.patch_notes }}
         run: |
           set -euo pipefail
-          tag="build-${GITHUB_RUN_NUMBER}"
+          tag=$(git tag --points-at "$GITHUB_SHA" --list 'build-*' --sort=-version:refname | head -n1)
+          if [ -z "$tag" ]; then
+            tag="build-${GITHUB_RUN_NUMBER}"
+          fi
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
 
           cat > notes.md <<EOF
@@ -648,11 +654,16 @@ jobs:
             printf '\n## Patch notes\n\n%s\n' "$PATCH_NOTES" >> notes.md
           fi
 
+          changelog="docs/releases/${tag}.md"
+          if [ -f "$changelog" ]; then
+            cat "$changelog" >> notes.md
+          fi
+
           gh release create "${tag}" dist/* \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --prerelease \
-            --title "Eglantine ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
+            --title "Eglantine ${GITHUB_REF_NAME} ${tag} (${GITHUB_SHA::7})" \
             --notes-file notes.md
 
       - name: Ping Discord
