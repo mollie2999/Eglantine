@@ -15,6 +15,7 @@ enum class Attribute : u64;
 enum class Patch : u64;
 class Inst;
 class Value;
+struct Program;
 } // namespace Shader::IR
 
 namespace Shader::Backend::SPIRV {
@@ -422,17 +423,17 @@ Id EmitStorageAtomicMaxF16x2(EmitContext& ctx, const IR::Value& binding, const I
                              Id value);
 Id EmitStorageAtomicMaxF32x2(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                              Id value);
-Id EmitGlobalAtomicIAdd32(EmitContext& ctx, Id address, Id value);
-Id EmitGlobalAtomicSMin32(EmitContext& ctx, Id address, Id value);
-Id EmitGlobalAtomicUMin32(EmitContext& ctx, Id address, Id value);
-Id EmitGlobalAtomicSMax32(EmitContext& ctx, Id address, Id value);
-Id EmitGlobalAtomicUMax32(EmitContext& ctx, Id address, Id value);
-Id EmitGlobalAtomicInc32(EmitContext& ctx, Id address, Id value);
-Id EmitGlobalAtomicDec32(EmitContext& ctx, Id address, Id value);
-Id EmitGlobalAtomicAnd32(EmitContext& ctx, Id address, Id value);
-Id EmitGlobalAtomicOr32(EmitContext& ctx, Id address, Id value);
-Id EmitGlobalAtomicXor32(EmitContext& ctx, Id address, Id value);
-Id EmitGlobalAtomicExchange32(EmitContext& ctx, Id address, Id value);
+Id EmitGlobalAtomicIAdd32(EmitContext& ctx, const IR::Value& address, Id value);
+Id EmitGlobalAtomicSMin32(EmitContext& ctx);
+Id EmitGlobalAtomicUMin32(EmitContext& ctx);
+Id EmitGlobalAtomicSMax32(EmitContext& ctx);
+Id EmitGlobalAtomicUMax32(EmitContext& ctx, const IR::Value& address, Id value);
+Id EmitGlobalAtomicInc32(EmitContext& ctx);
+Id EmitGlobalAtomicDec32(EmitContext& ctx);
+Id EmitGlobalAtomicAnd32(EmitContext& ctx);
+Id EmitGlobalAtomicOr32(EmitContext& ctx);
+Id EmitGlobalAtomicXor32(EmitContext& ctx);
+Id EmitGlobalAtomicExchange32(EmitContext& ctx);
 Id EmitGlobalAtomicIAdd64(EmitContext& ctx);
 Id EmitGlobalAtomicSMin64(EmitContext& ctx);
 Id EmitGlobalAtomicUMin64(EmitContext& ctx);
@@ -455,7 +456,7 @@ Id EmitGlobalAtomicAnd32x2(EmitContext& ctx);
 Id EmitGlobalAtomicOr32x2(EmitContext& ctx);
 Id EmitGlobalAtomicXor32x2(EmitContext& ctx);
 Id EmitGlobalAtomicExchange32x2(EmitContext& ctx);
-Id EmitGlobalAtomicAddF32(EmitContext& ctx, Id address, Id value);
+Id EmitGlobalAtomicAddF32(EmitContext& ctx);
 Id EmitGlobalAtomicAddF16x2(EmitContext& ctx);
 Id EmitGlobalAtomicAddF32x2(EmitContext& ctx);
 Id EmitGlobalAtomicMinF16x2(EmitContext& ctx);
@@ -636,5 +637,8 @@ Id EmitDPdxFine(EmitContext& ctx, Id op_a);
 Id EmitDPdyFine(EmitContext& ctx, Id op_a);
 Id EmitDPdxCoarse(EmitContext& ctx, Id op_a);
 Id EmitDPdyCoarse(EmitContext& ctx, Id op_a);
+
+Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c);
+void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program);
 
 } // namespace Shader::Backend::SPIRV

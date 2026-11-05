@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <span>
+
 #include <boost/container/static_vector.hpp>
 
 #include "common/settings.h"
@@ -362,6 +365,29 @@ Id Emit(MethodPtrType sparse_ptr, MethodPtrType non_sparse_ptr, EmitContext& ctx
     return ctx.OpCompositeExtract(result_type, sample, 1U);
 }
 
+bool HasRuntimePerTapOffsets(IR::Inst* inst, const IR::Value& offset, const IR::Value& offset2) {
+    return !offset2.IsEmpty() && !inst->GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp) &&
+           (!offset.InstRecursive()->AreAllArgsImmediates() ||
+            !offset2.InstRecursive()->AreAllArgsImmediates());
+}
+
+// Per-tap offsets that are not constants: tap i is the w texel of a gather at offset i.
+template <typename GatherFn>
+Id GatherPerTap(EmitContext& ctx, IR::Inst* inst, Id result_type, Id component_type,
+                const IR::Value& offset, const IR::Value& offset2, GatherFn&& gather) {
+    std::array<Id, 4> taps;
+    for (u32 i = 0; i < 4; ++i) {
+        const Id packed{ctx.Def(i < 2 ? offset : offset2)};
+        const u32 first{(i % 2) * 2};
+        const Id tap_offset{ctx.OpCompositeConstruct(ctx.U32[2],
+                                                     ctx.OpCompositeExtract(ctx.U32[1], packed, first),
+                                                     ctx.OpCompositeExtract(ctx.U32[1], packed, first + 1))};
+        const Id sample{Decorate(ctx, inst, gather(std::span<const Id>(&tap_offset, 1)))};
+        taps[i] = ctx.OpCompositeExtract(component_type, sample, 3U);
+    }
+    return ctx.OpCompositeConstruct(result_type, taps[0], taps[1], taps[2], taps[3]);
+}
+
 Id IsScaled(EmitContext& ctx, const IR::Value& index, Id member_index, u32 base_index) {
     const Id push_constant_u32{ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U32[1])};
     Id bit{};
@@ -633,10 +659,20 @@ Id EmitImageGather(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id 
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     const bool is_integer{IsTextureInteger(ctx, info)};
     const Id result_type{is_integer ? ctx.U32[4] : ctx.F32[4]};
-    const ImageOperands operands(ctx, offset, offset2);
     if (ctx.profile.need_gather_subpixel_offset) {
         coords = ImageGatherSubpixelOffset(ctx, info, TextureImage(ctx, info, index), coords);
     }
+    if (HasRuntimePerTapOffsets(inst, offset, offset2)) {
+        const Id texture{Texture(ctx, info, index)};
+        const Id component{ctx.Const(info.gather_component)};
+        const Id color{GatherPerTap(ctx, inst, result_type, is_integer ? ctx.U32[1] : ctx.F32[1],
+                                    offset, offset2, [&](std::span<const Id> tap_offset) {
+                                        return ctx.OpImageGather(result_type, texture, coords, component,
+                                                                 spv::ImageOperandsMask::Offset, tap_offset);
+                                    })};
+        return is_integer ? ctx.OpBitcast(ctx.F32[4], color) : color;
+    }
+    const ImageOperands operands(ctx, offset, offset2);
     const Id color{Emit(&EmitContext::OpImageSparseGather, &EmitContext::OpImageGather, ctx, inst,
                         result_type, Texture(ctx, info, index), coords,
                         ctx.Const(info.gather_component), operands.MaskOptional(),
@@ -649,10 +685,19 @@ Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, const IR::Value& index,
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     const bool is_integer{IsTextureInteger(ctx, info)};
     const Id result_type{is_integer ? ctx.U32[4] : ctx.F32[4]};
-    const ImageOperands operands(ctx, offset, offset2);
     if (ctx.profile.need_gather_subpixel_offset) {
         coords = ImageGatherSubpixelOffset(ctx, info, TextureImage(ctx, info, index), coords);
     }
+    if (HasRuntimePerTapOffsets(inst, offset, offset2)) {
+        const Id texture{Texture(ctx, info, index)};
+        const Id color{GatherPerTap(ctx, inst, result_type, is_integer ? ctx.U32[1] : ctx.F32[1],
+                                    offset, offset2, [&](std::span<const Id> tap_offset) {
+                                        return ctx.OpImageDrefGather(result_type, texture, coords, dref,
+                                                                     spv::ImageOperandsMask::Offset, tap_offset);
+                                    })};
+        return is_integer ? ctx.OpBitcast(ctx.F32[4], color) : color;
+    }
+    const ImageOperands operands(ctx, offset, offset2);
     const Id color{Emit(&EmitContext::OpImageSparseDrefGather, &EmitContext::OpImageDrefGather,
                         ctx, inst, result_type, Texture(ctx, info, index), coords, dref,
                         operands.MaskOptional(), operands.Span())};

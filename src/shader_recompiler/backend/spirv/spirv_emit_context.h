@@ -213,6 +213,8 @@ public:
 
     const Profile& profile;
     const RuntimeInfo& runtime_info;
+    const bool requires_coherent_global_memory;
+    const bool requires_coherent_image_memory;
     Stage stage{};
 
     Id void_id{};
@@ -343,11 +345,8 @@ public:
     Id write_global_func_u32{};
     Id write_global_func_u32x2{};
     Id write_global_func_u32x4{};
-    // 32-bit global atomics on untracked addresses, routed to the storage buffer holding them.
-    enum class GlobalAtomic : size_t {
-        IAdd, SMin, UMin, SMax, UMax, Inc, Dec, And, Or, Xor, Exchange, AddF32, Count,
-    };
-    std::array<Id, static_cast<size_t>(GlobalAtomic::Count)> global_atomic_funcs{};
+    Id atomic_add_global_func_u32{};
+    Id atomic_umax_global_func_u32{};
 
     bool need_input_position_indirect{};
     Id input_position{};
@@ -365,6 +364,7 @@ public:
     Id sample_mask{};
     Id frag_depth{};
 
+    std::array<Id, 2> software_matrix_functions{};
     std::vector<Id> interfaces;
     std::vector<std::pair<u32, spv::Op>> opcode_rewrites;
 
