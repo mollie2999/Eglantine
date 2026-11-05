@@ -789,6 +789,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             break;
         }
         case 0x424: case 0x624: { // IMAD.MOV.U32: zero product plus immediate/cbuf
+            // This signed form negates the multiplier, but RZ * -B + RZ is still zero.
+            if (opcode == 0x624 && insn.Bits(24, 8) == 255 && insn.Bits(64, 8) == 255 &&
+                insn.Bits(62, 2) == 2 && insn.words[2] == 0x078e02ff) {
+                mov_imm(static_cast<u32>(dest), 0);
+                break;
+            }
             if (opcode == 0x624 && insn.Bits(24, 8) == 255 &&
                 (insn.words[2] & ~0x07800000U) == 0x000e06ffU) {
                 const u32 source = operand(2, false);
