@@ -55,6 +55,12 @@ public:
         idle_hook = hook;
         idle_argument = argument;
     }
+    /// Any thread: has the back call the idle hook soon, between entries or at once if it sleeps.
+    void RequestIdleHook() {
+        hook_requested.store(true, std::memory_order_seq_cst);
+        wake.fetch_add(1, std::memory_order_seq_cst);
+        wake.notify_one();
+    }
 
     /// Starts the back thread once the split is wanted (EDEN_NX2_SPLIT=1, a Switch 2 title,
     /// commands read without cache flushes). Called by the front between commands.
@@ -188,6 +194,7 @@ private:
     static inline thread_local bool on_back_thread{};
     void (*idle_hook)(void*){};
     void* idle_argument{};
+    alignas(64) std::atomic<bool> hook_requested{};
 
     // 128 bytes: x86 spatial prefetchers pull 64-byte lines in pairs. back_waiting and wake are
     // always touched together by both threads, so they share a block.
