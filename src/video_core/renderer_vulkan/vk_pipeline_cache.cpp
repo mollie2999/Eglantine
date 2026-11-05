@@ -66,7 +66,7 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-constexpr u32 CACHE_VERSION = 21;
+constexpr u32 CACHE_VERSION = 22;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -1068,6 +1068,11 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
         return pipeline;
     }
     if (!use_asynchronous_shaders) {
+        return pipeline;
+    }
+    // Native draws can update persistent textures, including ink atlases. Keep the draw queued
+    // while its pipeline compiles: neither depth use nor its vertex count makes it safe to drop.
+    if (gpu_memory && gpu_memory->UsesNativeTiling()) {
         return pipeline;
     }
     // If something is using depth, we can assume that games are not rendering anything which
