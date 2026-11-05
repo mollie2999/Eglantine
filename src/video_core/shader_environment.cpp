@@ -99,6 +99,20 @@ static Shader::TexturePixelFormat ConvertTexturePixelFormat(const Tegra::Texture
                                    entry.a_type, entry.srgb_conversion));
 }
 
+// This must match TextureCacheRuntime's fallback for NULL_IMAGE_VIEW_ID. Pipeline construction
+// resolves texture type and format before the texture cache binds the view. An out-of-range TIC
+// is bound as that null view, so arbitrary bytes after the pool must not reach the compiler.
+static Tegra::Texture::TICEntry NullTextureInfo() {
+    Tegra::Texture::TICEntry entry{};
+    entry.format = Tegra::Texture::TextureFormat::A8B8G8R8;
+    entry.r_type = Tegra::Texture::ComponentType::UNORM;
+    entry.g_type = Tegra::Texture::ComponentType::UNORM;
+    entry.b_type = Tegra::Texture::ComponentType::UNORM;
+    entry.a_type = Tegra::Texture::ComponentType::UNORM;
+    entry.texture_type = Tegra::Texture::TextureType::Texture2D;
+    return entry;
+}
+
 static std::string_view StageToPrefix(Shader::Stage stage) {
     switch (stage) {
     case Shader::Stage::VertexB:
@@ -385,7 +399,17 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
     const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
                                                        gpu_memory->UsesNativeTiling())};
-    ASSERT(index <= tic_limit);
+    if (index > tic_limit) {
+        static std::atomic<u32> invalid_tics{};
+        if (invalid_tics.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_WARNING(HW_GPU,
+                        "Invalid shader TIC: program={:#x} stage={} raw_handle={:#x} index={} "
+                        "limit={} via_header_index={} native_tiling={}",
+                        program_base, static_cast<u32>(stage), raw, index, tic_limit,
+                        via_header_index, gpu_memory->UsesNativeTiling());
+        }
+        return NullTextureInfo();
+    }
     const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
     Tegra::Texture::TICEntry entry;
     gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
