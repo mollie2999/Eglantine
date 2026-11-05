@@ -30,29 +30,6 @@ namespace Tegra {
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
 
-namespace {
-
-bool MayWriteCommandList(Engines::EngineInterface& engine, Engines::EngineTypes type,
-                         u32 method, bool is_last_call) {
-    switch (type) {
-    case Engines::EngineTypes::KeplerCompute: {
-        const auto& compute = static_cast<const Engines::KeplerCompute&>(engine);
-        // 0xAF is the legacy launch register and a native QMD signal. Native QMD dispatches
-        // can also be triggered at 0xB0; native macros may emit either launch sequence.
-        return method == KEPLER_COMPUTE_REG_INDEX(launch) ||
-               (compute.IsNativeMode() &&
-                (method == 0xB0 || (method >= MacroRegistersStart && is_last_call)));
-    }
-    case Engines::EngineTypes::MaxwellDMA:
-        // MaxwellDMA's execution mask contains only launch_dma, where the copy actually runs.
-        return method < engine.execution_mask.size() && engine.execution_mask[method];
-    default:
-        return false;
-    }
-}
-
-} // Anonymous namespace
-
 DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Control::ChannelState& channel_state_)
     : system{system_}
     , memory_manager{memory_manager_}
@@ -87,8 +64,24 @@ bool DmaPusher::Step() {
     if (!ib_enable || dma_pushbuffer.empty()) {
         return false;
     }
+    const u64 suspensions_before = suspensions.load(std::memory_order_relaxed);
     if (!puller.ResumeAcquire(*this)) {
         return false;
+    }
+    // Lists queued while the channel waited were read from memory, not as submitted: the game
+    // writes the commands a list runs before it releases the acquire, so the words at submit time
+    // could be older. Reading them as late as the parse is too late in Hyrule Warriors: Age of
+    // Imprisonment fights: a command ring the game had already refilled for a later frame, read
+    // as this frame's commands (methods on unbound subchannels, garbage QMDs, then a channel
+    // waiting forever on a release it never got). The acquire is released now, so the commands
+    // are written and the memory not yet reused: copy them here. EDEN_NX2_RESNAPSHOT=0: off.
+    if (ResnapshotEnabled() && suspensions.load(std::memory_order_relaxed) != suspensions_before) {
+        const u64 now = suspensions.load(std::memory_order_acquire);
+        for (CommandList& list : dma_pushbuffer) {
+            if (!list.submitted_offsets.empty()) {
+                RefreshSnapshot(list, now);
+            }
+        }
     }
 
     CommandList& command_list = dma_pushbuffer.front();
@@ -97,7 +90,7 @@ bool DmaPusher::Step() {
     const size_t command_list_size = command_list.command_lists.size();
 
     if (prefetch_size == 0 && command_list_size == 0) {
-        dma_pushbuffer.pop();
+        dma_pushbuffer.pop_front();
         dma_pushbuffer_subindex = 0;
         return true;
     }
@@ -110,7 +103,7 @@ bool DmaPusher::Step() {
             return false;
         }
         command_resume_offset = 0;
-        dma_pushbuffer.pop();
+        dma_pushbuffer.pop_front();
         return true;
     }
 
@@ -185,8 +178,7 @@ bool DmaPusher::Step() {
         // billions of instances and lost the device loading a race).
         bool gpu_written =
             IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
-        if (header.size <= 8 && command_resume_offset == 0 && !gpu_written &&
-            VideoCommon::GpuSplit::Get().Active() &&
+        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
             VideoCommon::GpuSplit::Get().WaitForWriters()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
@@ -252,7 +244,7 @@ bool DmaPusher::Step() {
             }
         }
         parked_methods.clear();
-        dma_pushbuffer.pop();
+        dma_pushbuffer.pop_front();
         dma_pushbuffer_subindex = 0;
     } else {
         signal_sync = command_list.command_lists[dma_pushbuffer_subindex].sync && Settings::values.sync_memory_operations.GetValue();
@@ -453,11 +445,10 @@ void DmaPusher::CallMethod(u32 argument) {
             ReportUnboundSubchannel();
             return;
         }
+        // Compute dispatches and DMA copies write the command lists ReadGpuWrittenCommands reads.
         const auto engine_type = subchannel_type[dma_state.subchannel];
-        // Register setup does not write command lists. Advance this wait point only for dispatch,
-        // copy, native QMD signal, or completed native macro methods that can launch those writes.
-        const bool writer = MayWriteCommandList(*subchannel, engine_type, dma_state.method,
-                                                dma_state.is_last_call);
+        const bool writer = engine_type == Engines::EngineTypes::KeplerCompute ||
+                            engine_type == Engines::EngineTypes::MaxwellDMA;
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
@@ -513,10 +504,10 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
             ReportUnboundSubchannel();
             return;
         }
+        // Compute dispatches and DMA copies write the command lists ReadGpuWrittenCommands reads.
         const auto engine_type = subchannel_type[dma_state.subchannel];
-        const bool completes_method = dma_state.method_count <= num_methods;
-        const bool writer = MayWriteCommandList(*subchannel, engine_type, dma_state.method,
-                                                completes_method);
+        const bool writer = engine_type == Engines::EngineTypes::KeplerCompute ||
+                            engine_type == Engines::EngineTypes::MaxwellDMA;
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
@@ -550,6 +541,19 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         subchannel->ConsumeSink(system);
         subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
         subchannel->CallMultiMethod(system, dma_state.method, base_start, num_methods, dma_state.method_count);
+    }
+}
+
+void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
+    list.snapshot_suspensions = now;
+    for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
+        const CommandListHeader& entry = list.command_lists[i];
+        const u32 offset = list.submitted_offsets[i];
+        if (offset + entry.size > list.submitted_words.size()) {
+            continue;
+        }
+        memory_manager.ReadBlockUnsafe(entry.addr, list.submitted_words.data() + offset,
+                                       entry.size * sizeof(u32));
     }
 }
 

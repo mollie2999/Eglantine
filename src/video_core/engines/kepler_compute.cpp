@@ -11,7 +11,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <optional>
+#include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include "common/assert.h"
@@ -20,9 +22,11 @@
 #include "shader_recompiler/exception.h"
 #include "core/core.h"
 #include "video_core/gpu_split.h"
+#include "video_core/nx2_diag.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2.h"
 #include "video_core/engines/fermi_2d.h"
+#include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/game_dlss_status.h"
@@ -539,6 +543,10 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
         const u32 high = qmd[33 + slot * 2];
         if (high & 0x1ff00) {
             LOG_ERROR(HW_GPU, "Native compute constant address exceeds supported GPU width");
+            if (VideoCommon::Nx2Diag::CountersEnabled()) {
+                VideoCommon::Nx2Diag::Diagnostics::Get().Note(true, regs.code_loc.Address(), 0, "dropped", 0, 0,
+                                                              "constant address too wide");
+            }
             return false;
         }
         auto& buffer = launch_description.const_buffer_config[slot];
@@ -546,8 +554,50 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
         buffer.address_high.Assign(high & 0xff);
         buffer.size.Assign(((high >> 19) & 0x1fff) << 4);
     }
-    if (!launch_description.block_dim_x || !launch_description.block_dim_y || !launch_description.block_dim_z)
+    const u64 diag_code = regs.code_loc.Address();
+    const u32 diag_groups = launch_description.grid_dim_x.Value() * launch_description.grid_dim_y.Value() *
+                            launch_description.grid_dim_z.Value();
+    const u32 diag_threads = launch_description.block_dim_x.Value() * launch_description.block_dim_y.Value() *
+                             launch_description.block_dim_z.Value();
+    const auto diag_note = [&](std::string_view outcome, std::string_view detail = {}) {
+        namespace Diag = VideoCommon::Nx2Diag;
+        if (!Diag::Active()) {
+            return;
+        }
+        auto& diag = Diag::Diagnostics::Get();
+        diag.Touch('c', diag_code, outcome, diag_groups, diag_threads, 0, 0);
+        if (const u64 key = diag.ProgramKey(diag_code); diag.Inspecting(key)) {
+            for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
+                const auto& buffer = launch_description.const_buffer_config[slot];
+                std::vector<u32> words(std::min<u32>(buffer.size.Value(), 0x2000) / 4);
+                if ((launch_description.const_buffer_enable_mask.Value() >> slot) & 1 && !words.empty() &&
+                    memory_manager.IsFullyMappedRange(buffer.Address(), words.size() * 4)) {
+                    memory_manager.ReadBlockUnsafe(buffer.Address(), words.data(), words.size() * 4);
+                    diag.Observe(key, slot, words);
+                }
+            }
+        }
+        if (Diag::CountersEnabled()) {
+            diag.Note(true, diag_code, 0, outcome, diag_groups, diag_threads, detail);
+        }
+        if (diag.Capturing()) {
+            diag.Row(fmt::format("{}\tdispatch\t{:#x}\t0x0\t{}\t{}\t{}\t0\t0x0\t0\t0\t0x0\t0\t0\t0x0\tgrid={}x{}x{} block={}x{}x{}\t{:016x}\t0000000000000000",
+                                 diag.NextSeq(), diag_code, outcome, diag_threads, diag_groups,
+                                 launch_description.grid_dim_x.Value(), launch_description.grid_dim_y.Value(),
+                                 launch_description.grid_dim_z.Value(), launch_description.block_dim_x.Value(),
+                                 launch_description.block_dim_y.Value(), launch_description.block_dim_z.Value(),
+                                 diag.ProgramKey(diag_code)));
+        }
+    };
+    if (!launch_description.block_dim_x || !launch_description.block_dim_y || !launch_description.block_dim_z) {
+        diag_note("dropped", "zero block dimension");
         return false;
+    }
+    if (VideoCommon::Nx2Diag::Ablates() &&
+        VideoCommon::Nx2Diag::Diagnostics::Get().Ablated('c', diag_code)) {
+        diag_note("ablated");
+        return false;
+    }
     // Fortune's Weave's DLSS evaluation runs from its first pass to the pass that writes the
     // upscaled image. Its inputs are kept from the first pass for a replacement upscale.
     if (RememberDlssMotionVectors()) {
@@ -580,7 +630,9 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
     bool dispatched = true;
     try {
         rasterizer->DispatchCompute();
+        diag_note("ok");
     } catch (const Shader::Exception& error) {
+        diag_note("failed", error.what());
         static std::unordered_set<std::string> logged;
         if (logged.insert(error.what()).second) {
             LOG_ERROR(HW_GPU, "Native compute shader rejected: {}", error.what());
@@ -616,14 +668,14 @@ constexpr u32 DLSS_CHECK_MISMATCH_PERCENT = 3;
 // The game's own DLSS network (its translated programs) is shown once every pass of an
 // evaluation has run several times in a row and its output has passed several health checks in
 // a row. Until then, when any pass can't run, and for the rest of the session once the network
-// fails its checks, the replacement upscale draws over the output pass's result. The setting
-// "Use the game's own DLSS" off, NVIDIA DLSS on or EDEN_NX2_DLSS_REPLACEMENT=fsr|standin keep the
-// replacement. The network's image sizes are fixed by the game, so it is used only without
-// resolution scaling; its matrix multiplies need shaders 32 threads wide.
+// fails its checks, the replacement upscale draws over the output pass's result. NVIDIA DLSS on
+// or EDEN_NX2_DLSS_REPLACEMENT=fsr|standin keep the replacement. The network's image sizes are
+// fixed by the game, so it is used only without resolution scaling; its matrix multiplies need
+// shaders 32 threads wide.
 VideoCore::GameDlssReason KeplerCompute::GameDlssBlocker() const {
     using VideoCore::GameDlssReason;
     static const bool forced_replacement = std::getenv("EDEN_NX2_DLSS_REPLACEMENT") != nullptr;
-    if (forced_replacement || !Settings::values.game_dlss_network.GetValue()) {
+    if (forced_replacement) {
         return GameDlssReason::TurnedOff;
     }
     // NVIDIA DLSS, when turned on and running, comes first.
@@ -641,8 +693,16 @@ VideoCore::GameDlssReason KeplerCompute::GameDlssBlocker() const {
 }
 
 bool KeplerCompute::EmulatesNativeTensorPrograms() const {
-    return dlss_chain.active && dlss_chain.failure == VideoCore::GameDlssReason::None &&
-           GameDlssBlocker() == VideoCore::GameDlssReason::None;
+    if (dlss_chain.active) {
+        return dlss_chain.failure == VideoCore::GameDlssReason::None &&
+               GameDlssBlocker() == VideoCore::GameDlssReason::None;
+    }
+    // Donkey Kong Bananza's programs are emulated: rejected, they write nothing and the screen is
+    // purple from its mode select on. Other titles keep the upscale stand-in (emulating title 4's
+    // network takes the host driver minutes to compile). Chosen per title, not per dispatch: the
+    // shader cache keeps the result of a program's first dispatch.
+    constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
+    return Settings::GetCurrentProgramID() == DonkeyKongBananzaProgramId;
 }
 
 // Checks the network's output against its input (on the GPU; the result arrives a few frames
@@ -723,7 +783,7 @@ void KeplerCompute::CheckDlssNetwork() {
                 probe->mismatched, probe->blocks, probe->worst, probe->invalid_samples);
 }
 
-// Tells the Graphics tab what draws the game's DLSS evaluation, when that changes.
+// Logs what draws the game's DLSS evaluation, when that changes.
 void KeplerCompute::UpdateGameDlssStatus(bool complete, VideoCore::GameDlssReason blocker) {
     using VideoCore::GameDlssReason;
     using VideoCore::GameDlssState;
@@ -757,7 +817,6 @@ void KeplerCompute::UpdateGameDlssStatus(bool complete, VideoCore::GameDlssReaso
                  VideoCore::GameDlssReasonText(shown.reason));
     }
     dlss_chain.status = shown;
-    VideoCore::SetGameDlssStatus(shown);
 }
 
 // Ends this frame's DLSS evaluation at its output pass: either the network's own result stays,
@@ -888,6 +947,44 @@ bool KeplerCompute::RememberDlssMotionVectors() {
 // 720p to 1440p docked). Blit one to the other with bilinear filtering when both are plain 2D
 // images of the same format and the output is larger: title 4's slots first, then Fortune's
 // Weave's, else the first two handles in cbuf0+0x80..0x11c that form such a pair.
+// The cbuf0 byte offsets of the texture handles a native program reads (TEX, TLD, TLD4, TXD) and
+// the surface handles it stores to (SUST.P), from its code up to the first unconditional EXIT.
+std::pair<std::vector<u32>, std::vector<u32>> KeplerCompute::NativeImageHandles(GPUVAddr program) {
+    static std::unordered_map<GPUVAddr, std::pair<std::vector<u32>, std::vector<u32>>> cache;
+    if (const auto it = cache.find(program); it != cache.end()) {
+        return it->second;
+    }
+    std::pair<std::vector<u32>, std::vector<u32>> handles;
+    const auto add = [](std::vector<u32>& list, u32 offset) {
+        if (std::find(list.begin(), list.end(), offset) == list.end()) list.push_back(offset);
+    };
+    std::array<u32, 0x400> block{};
+    bool exited = false;
+    for (u64 offset = 0; offset < 0x40000 && !exited; offset += sizeof(block)) {
+        if (!memory_manager.IsFullyMappedRange(program + offset, sizeof(block))) break;
+        memory_manager.ReadBlock(program + offset, block.data(), sizeof(block));
+        for (size_t word = 0; word < block.size() && !exited; word += 4) {
+            const u32 opcode = block[word] & 0xfff;
+            const u32 binding = (block[word + 1] >> 22) & 0x1f;
+            const u32 handle = ((block[word + 1] >> 8) & 0x3fff) * 4;
+            switch (opcode) {
+            case 0xb60: case 0xb63: case 0xb66: case 0xb6d:
+                if (binding == 0) add(handles.first, handle);
+                break;
+            case 0xb9b:
+                if (binding == 0) add(handles.second, handle);
+                break;
+            case 0x94d: // EXIT, unconditional when guarded by PT
+                exited = ((block[word] >> 12) & 0xf) == 7;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    return cache.emplace(program, std::move(handles)).first->second;
+}
+
 bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
     const auto& cbuf = launch_description.const_buffer_config[0];
     const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
@@ -896,11 +993,19 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         if (tic_index > regs.tic.limit) return std::nullopt;
         return GetTICEntry(tic_index);
     };
+    // An upscale keeps the aspect ratio and scales by at most 4: anything else (a 4x4 lookup
+    // table, a 120x67 luminance image) is another image the program happens to use.
     const auto upscale_pair = [](const std::optional<Texture::TICEntry>& from,
-                                 const std::optional<Texture::TICEntry>& to) {
-        return from && to && from->format == to->format && from->Address() != 0 &&
-               to->Address() != 0 && to->Width() > from->Width() && from->IsBlockLinear() &&
-               to->IsBlockLinear();
+                                 const std::optional<Texture::TICEntry>& to, bool same_format = true) {
+        if (!from || !to || (same_format && from->format != to->format) || from->Address() == 0 ||
+            to->Address() == 0 || from->Address() == to->Address() || !from->IsBlockLinear() ||
+            !to->IsBlockLinear())
+            return false;
+        const u64 from_width = from->Width(), from_height = from->Height();
+        const u64 to_width = to->Width(), to_height = to->Height();
+        const u64 cross_a = to_width * from_height, cross_b = to_height * from_width;
+        return from_width >= 64 && to_width > from_width && to_width <= from_width * 4 &&
+               (cross_a > cross_b ? cross_a - cross_b : cross_b - cross_a) * 32 <= cross_a;
     };
     std::optional<Texture::TICEntry> input = image(0x90), output = image(0xa0);
     bool fortunes_weave = false;
@@ -910,6 +1015,29 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         fortunes_weave = upscale_pair(input, output);
     }
     if (!upscale_pair(input, output)) {
+        // The images the program itself uses: textures it reads and the surface it stores to
+        // through cbuf0 handles (Ocarina of Time's gameplay network reads +0xc0, writes +0xd0).
+        // The input is the largest read image that the output upscales, the output's format first.
+        const auto [reads, stores] = NativeImageHandles(regs.code_loc.Address());
+        input.reset();
+        output.reset();
+        for (const u32 store : stores) {
+            const auto to = image(store);
+            for (const bool same_format : {true, false}) {
+                for (const u32 read : reads) {
+                    const auto from = image(read);
+                    if (upscale_pair(from, to, same_format) &&
+                        (!input || u64{from->Width()} * from->Height() > u64{input->Width()} * input->Height())) {
+                        input = from;
+                        output = to;
+                    }
+                }
+                if (input) break;
+            }
+            if (input) break;
+        }
+    }
+    if (!upscale_pair(input, output, false)) {
         input.reset();
         output.reset();
         for (u32 first = 0x80; first < 0x120 && !input; first += 4) {
@@ -926,20 +1054,39 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
             }
         }
     }
-    if (!input || !output)
+    const auto skip = [&](std::string_view reason) {
+        static std::unordered_set<GPUVAddr> reported;
+        if (reported.insert(regs.code_loc.Address()).second && reported.size() <= 64) {
+            LOG_INFO(HW_GPU, "Upscale fallback for program {:#x} skipped: {}", regs.code_loc.Address(),
+                     reason);
+        }
         return false;
+    };
+    if (!input || !output)
+        return skip("no input/output image pair in the program's handles or cbuf0+0x80..0x11c");
     using RTFormat = Tegra::RenderTargetFormat;
-    RTFormat format{};
-    switch (input->format) {
-    case Texture::TextureFormat::A2B10G10R10: format = RTFormat::A2B10G10R10_UNORM; break;
-    case Texture::TextureFormat::A8B8G8R8: format = RTFormat::A8B8G8R8_UNORM; break;
-    case Texture::TextureFormat::B10G11R11: format = RTFormat::B10G11R11_FLOAT; break;
-    case Texture::TextureFormat::R16G16B16A16: format = RTFormat::R16G16B16A16_FLOAT; break;
-    default: return false;
+    const auto blit_format = [](const Texture::TICEntry& tic) -> std::optional<RTFormat> {
+        switch (tic.format) {
+        case Texture::TextureFormat::A2B10G10R10: return RTFormat::A2B10G10R10_UNORM;
+        case Texture::TextureFormat::A8B8G8R8:
+            return tic.r_type == Texture::ComponentType::UNORM && tic.srgb_conversion
+                       ? RTFormat::A8B8G8R8_SRGB
+                       : RTFormat::A8B8G8R8_UNORM;
+        case Texture::TextureFormat::B10G11R11: return RTFormat::B10G11R11_FLOAT;
+        case Texture::TextureFormat::R16G16B16A16: return RTFormat::R16G16B16A16_FLOAT;
+        default: return std::nullopt;
+        }
+    };
+    // E5B9G9R9 (Ocarina of Time's gameplay frame) has no 2D surface format: the blit reads it as a
+    // 32-bit placeholder surface and the texture cache samples it as E5B9G9R9.
+    const bool shared_exponent_input = input->format == Texture::TextureFormat::E5B9G9R9;
+    if ((!blit_format(*input) && !shared_exponent_input) || !blit_format(*output)) {
+        return skip(fmt::format("formats {} -> {}", static_cast<u32>(input->format.Value()),
+                                static_cast<u32>(output->format.Value())));
     }
     const auto surface = [&](const Texture::TICEntry& tic) {
         Fermi2D::Surface result{};
-        result.format = format;
+        result.format = blit_format(tic).value_or(RTFormat::B10G11R11_FLOAT);
         result.linear = Fermi2D::MemoryLayout::BlockLinear;
         result.block_width.Assign(tic.block_width);
         result.block_height.Assign(tic.block_height);
@@ -1035,6 +1182,9 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         }
     }
     auto source = surface(*input);
+    if (shared_exponent_input) {
+        source.format = RTFormat::B10G11R11_FLOAT; // same size per texel, replaced below
+    }
     // EDEN_NX2_UPSCALE_SOURCE=<gpu address>: blit from another same-sized image (debug aid).
     if (static const u64 override_source = [] {
             const char* value = std::getenv("EDEN_NX2_UPSCALE_SOURCE");
@@ -1064,8 +1214,12 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
                                                      dlss_depth ? &*dlss_depth : nullptr,
                                                      dlss_jitter, {1.0f, 1.0f});
     };
+    if (shared_exponent_input) {
+        VideoCommon::g_blit_source_format = VideoCore::Surface::PixelFormat::E5B9G9R9_FLOAT;
+    }
     const bool done = upscale_temporally() ||
                       rasterizer->AccelerateSurfaceCopy(source, surface(*output), config);
+    VideoCommon::g_blit_source_format.reset();
     if (static u32 checked{}; checked++ == sample_at) {
         const u64 size = u64{output->Width()} * output->Height() * 4;
         if (const auto device = memory_manager.GpuToCpuAddress(output->Address())) {
@@ -1088,10 +1242,11 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 30U;
     }();
     if (static u32 count{}; ++count == trace_at) g_nx2_trace_draws_after_upscale = 40;
-    static u32 logged{};
-    if (logged++ < 4) {
-        LOG_INFO(HW_GPU, "Upscale fallback {:#x} {}x{} block {}/{}/{} -> {:#x} {}x{} block {}/{}/{} levels {}: {}",
-                 input->Address(), input->Width(), input->Height(), input->block_width.Value(),
+    // Once per program and image pair (gameplay brings programs and targets the title has not).
+    static std::set<std::tuple<GPUVAddr, GPUVAddr, GPUVAddr>> logged;
+    if (logged.emplace(program, input->Address(), output->Address()).second && logged.size() <= 64) {
+        LOG_INFO(HW_GPU, "Upscale fallback {:#x}: {:#x} {}x{} block {}/{}/{} -> {:#x} {}x{} block {}/{}/{} levels {}: {}",
+                 program, input->Address(), input->Width(), input->Height(), input->block_width.Value(),
                  input->block_height.Value(), input->block_depth.Value(), output->Address(),
                  output->Width(), output->Height(), output->block_width.Value(),
                  output->block_height.Value(), output->block_depth.Value(), output->max_mip_level.Value(),

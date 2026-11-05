@@ -116,6 +116,12 @@ public:
     ~PipelineCache();
 
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
+    [[nodiscard]] bool IsIndirectResetShader() const;
+
+    /// Why the last CurrentGraphicsPipeline() returned null (diagnostics).
+    [[nodiscard]] const char* GraphicsMissReason() const noexcept {
+        return graphics_miss;
+    }
 
     void TickFrame();
 
@@ -167,6 +173,7 @@ private:
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};
+    mutable const char* graphics_miss{"no-pipeline"};
 
     /// Destroys graphics pipelines unused for a while, once the GPU is done with them.
     void EvictUnusedPipelines();

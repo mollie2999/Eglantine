@@ -125,13 +125,13 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
         if (nup.GetStatus() != Loader::ResultStatus::Success) {
             return false;
         }
+        const auto base = nup.FindBasePackage();
+        const auto update = nup.FindBestUpdatePackage();
         std::optional<std::size_t> program;
-        if (const auto base = nup.FindBasePackage();
-            base && nup.GetExeFSDir(*base) != nullptr) {
-            program = base;
-        } else if (const auto update = nup.FindBestUpdatePackage();
-                   update && nup.GetExeFSDir(*update) != nullptr) {
+        if (update && nup.GetExeFSDir(*update) != nullptr) {
             program = update;
+        } else if (base && nup.GetExeFSDir(*base) != nullptr) {
+            program = base;
         }
         const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
@@ -317,12 +317,6 @@ struct System::Impl {
 
     void InitializeKernel(System& system) {
         LOG_DEBUG(Core, "initialized OK");
-
-        // ShutdownMainProcess releases it after a Switch 2 game; create it before the check below
-        // so an empty slot alone does not rerun the full Initialize.
-        if (!device_memory.has_value()) {
-            device_memory.emplace();
-        }
 
         // Setting changes may require a full system reinitialization (e.g., disabling multicore).
         ReinitializeIfNecessary(system);
@@ -525,13 +519,6 @@ struct System::Impl {
 
         // Reset all glue registrations
         arp_manager.ResetAll();
-
-        // The guest RAM section keeps every page the game touched until it is destroyed (up to
-        // 12 GiB), and the next Load reuses it. Switch 2 only: Switch 1 keeps its behaviour.
-        // InitializeKernel creates it again, sized for the next game.
-        if (Settings::CurrentProgramIsSwitch2()) {
-            device_memory.reset();
-        }
 
         LOG_DEBUG(Core, "Shutdown OK");
     }

@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <memory>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -14,6 +16,8 @@
 #include <set>
 #include <fstream>
 #include <mutex>
+#include <string_view>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -28,6 +32,7 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/native_query_trace.h"
+#include "video_core/indirect_reset.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -50,6 +55,7 @@
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+#include "video_core/nx2_diag.h"
 #include "video_core/nx2_profile.h"
 
 namespace Vulkan {
@@ -205,6 +211,11 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
 }
 } // Anonymous namespace
 
+namespace {
+// EDEN_NX2_DIAG_SAMPLES: the occlusion query pool of the draw probe (created on first use).
+vk::QueryPool* g_diag_pool{};
+} // Anonymous namespace
+
 RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra::GPU& gpu_,
                                    Tegra::MaxwellDeviceMemoryManager& device_memory_,
                                    const Device& device_, MemoryAllocator& memory_allocator_,
@@ -243,7 +254,158 @@ RasterizerVulkan::~RasterizerVulkan() {
     VideoCommon::GpuSplit::Get().SetIdleHook(nullptr, nullptr);
     scheduler.WaitWorker();
     scheduler.Finish();
+    delete std::exchange(g_diag_pool, nullptr);
 }
+
+// Experimental adaptation of PokeDinner commit 76df4591a747: execute the reset shader's
+// indirect record writes on the host until general GPU-address translation is available.
+bool RasterizerVulkan::TryNx2IndirectReset() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_RESETFIX");
+        return !value || std::string_view{value} != "0";
+    }();
+    if (!enabled || !maxwell3d->GetNativeMacroEngine().native_turing ||
+        !pipeline_cache.IsIndirectResetShader()) {
+        return false;
+    }
+    const auto reject = [](std::string_view reason) {
+        static u32 reported_rejections{};
+        if (reported_rejections++ < 8) {
+            LOG_WARNING(HW_GPU, "Experimental indirect reset skipped: {}", reason);
+        }
+        return false;
+    };
+    const auto in_gpu_range = [this](u64 address, size_t size) {
+        return size != 0 && address <= (std::numeric_limits<u64>::max)() - size &&
+               gpu_memory->IsWithinGPUAddressRange(address) &&
+               gpu_memory->IsWithinGPUAddressRange(address + size - 1);
+    };
+    const auto& cbuf = maxwell3d->state.shader_stages[0].const_buffers[0];
+    if (!cbuf.enabled || cbuf.size < 0x120 || !in_gpu_range(cbuf.address, 0x120) ||
+        !gpu_memory->IsFullyMappedRange(cbuf.address + 0x110, 16)) {
+        return reject("descriptor unavailable");
+    }
+    std::array<u64, 2> descriptor{};
+    gpu_memory->ReadBlock(cbuf.address + 0x110, descriptor.data(), sizeof(descriptor));
+    const u64 list = descriptor[0];
+    const auto& draw = maxwell3d->draw_manager.draw_state;
+    const u64 first = draw.vertex_buffer.first;
+    const u64 count = draw.vertex_buffer.count;
+    const auto range = VideoCommon::IndirectResetRange(list, static_cast<u32>(descriptor[1]),
+                                                        first, count);
+    if (!range || !in_gpu_range(range->begin, range->size) ||
+        !gpu_memory->IsFullyMappedRange(range->begin, range->size)) {
+        return reject("list outside mapped descriptor");
+    }
+    if (gpu_memory->IsMemoryDirty(range->begin, range->size, VideoCommon::CacheType::BufferCache)) {
+        gpu_memory->FlushRegion(range->begin, range->size, VideoCommon::CacheType::BufferCache);
+    }
+    std::vector<u64> pointers(count);
+    gpu_memory->ReadBlockUnsafe(range->begin, pointers.data(), range->size);
+    static constexpr std::array<u32, 5> record{0, 1, 0, 0, 0};
+    for (const u64 pointer : pointers) {
+        if (!pointer) {
+            continue;
+        }
+        if (!in_gpu_range(pointer, sizeof(record)) ||
+            !gpu_memory->IsFullyMappedRange(pointer, sizeof(record))) {
+            return reject("record not mapped");
+        }
+        if (pointer < range->begin + range->size && range->begin < pointer + sizeof(record)) {
+            return reject("record overlaps pointer list");
+        }
+        const auto segments = gpu_memory->GetSubmappedRange(pointer, sizeof(record));
+        if (segments.size() != 1 || segments[0].first != pointer ||
+            segments[0].second != sizeof(record)) {
+            return reject("record crosses a mapping boundary");
+        }
+    }
+    const std::span<const u8> bytes{reinterpret_cast<const u8*>(record.data()), sizeof(record)};
+    for (const u64 pointer : pointers) {
+        if (pointer) {
+            AccelerateInlineToMemory(pointer, bytes.size(), bytes);
+        }
+    }
+    static u32 reported{};
+    if (reported++ < 5) {
+        LOG_INFO(HW_GPU, "Experimental indirect reset: {} records", count);
+    }
+    return true;
+}
+
+namespace {
+// EDEN_NX2_DIAG*: what the draw being prepared is (set by Draw/DrawIndirect, read by PrepareDraw).
+struct DiagDraw {
+    const char* kind{"draw"};
+    u32 vertices{};
+    u32 instances{};
+};
+thread_local DiagDraw g_diag_draw;
+thread_local int g_diag_query{-1};
+
+u64 DiagShader(const Tegra::Engines::Maxwell3D& maxwell3d, size_t stage) {
+    const auto& regs = maxwell3d.regs;
+    return (u64{regs.pipelines[stage].reserved[0] & 0xff} << 32) | regs.pipelines[stage].reserved[1];
+}
+
+bool DiagAblated(const Tegra::Engines::Maxwell3D& maxwell3d) {
+    auto& diag = VideoCommon::Nx2Diag::Diagnostics::Get();
+    return diag.Ablated('v', DiagShader(maxwell3d, 1)) || diag.Ablated('p', DiagShader(maxwell3d, 5));
+}
+
+// Shows the constant buffers bound to a stage to the inspector (inspect.txt).
+void DiagObserveStage(Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager& gpu_memory,
+                      size_t stage, u64 key) {
+    auto& diag = VideoCommon::Nx2Diag::Diagnostics::Get();
+    const auto& info = maxwell3d.state.shader_stages[stage];
+    for (u32 slot = 0; slot < Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers; ++slot) {
+        const auto& buffer = info.const_buffers[slot];
+        if (!buffer.enabled || buffer.size == 0) {
+            continue;
+        }
+        std::vector<u32> words(std::min<u32>(buffer.size, 0x2000) / 4);
+        if (words.empty() || !gpu_memory.IsFullyMappedRange(buffer.address, words.size() * 4)) {
+            continue;
+        }
+        gpu_memory.ReadBlockUnsafe(buffer.address, words.data(), words.size() * 4);
+        diag.Observe(key, slot, words);
+    }
+}
+
+void DiagRecordDraw(Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager& gpu_memory,
+                    const char* outcome, bool mesh) {
+    auto& diag = VideoCommon::Nx2Diag::Diagnostics::Get();
+    const u64 vs = DiagShader(maxwell3d, 1);
+    const u64 ps = DiagShader(maxwell3d, 5);
+    {
+        const auto& rt = maxwell3d.regs.rt[0];
+        diag.Touch('v', vs, outcome, g_diag_draw.instances, g_diag_draw.vertices, rt.width, rt.height);
+        diag.Touch('p', ps, outcome, g_diag_draw.instances, g_diag_draw.vertices, rt.width, rt.height);
+        if (const u64 key = diag.ProgramKey(vs); diag.Inspecting(key)) {
+            DiagObserveStage(maxwell3d, gpu_memory, 0, key);
+        }
+        if (const u64 key = diag.ProgramKey(ps); diag.Inspecting(key)) {
+            DiagObserveStage(maxwell3d, gpu_memory, 4, key);
+        }
+    }
+    if (VideoCommon::Nx2Diag::CountersEnabled()) {
+        diag.Note(false, vs, ps, outcome, g_diag_draw.instances, g_diag_draw.vertices);
+    }
+    if (!diag.Capturing()) {
+        g_diag_query = -1;
+    } else {
+        const auto& regs = maxwell3d.regs;
+        diag.Row(fmt::format(
+            "{}\t{}\t{:#x}\t{:#x}\t{}\t{}\t{}\t{}\t{:#x}\t{}\t{}\t{:#x}\t{}\t{}\t{:#x}\t{}\t{:016x}\t{:016x}",
+            diag.NextSeq(), g_diag_draw.kind, vs, ps, outcome, g_diag_draw.vertices,
+            g_diag_draw.instances, static_cast<u32>(maxwell3d.draw_manager.draw_state.topology),
+            regs.rt[0].Address(), regs.rt[0].width, regs.rt[0].height,
+            static_cast<u32>(regs.rt[0].format), regs.zeta_enable, regs.blend.enable[0],
+            regs.color_mask[0].raw, mesh ? "mesh" : "", diag.ProgramKey(vs), diag.ProgramKey(ps)),
+            std::exchange(g_diag_query, -1), vs, ps);
+    }
+}
+} // namespace
 
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
@@ -266,7 +428,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
         gpu_memory->FlushCaching();
     }
 
+    const char* diag_outcome = "drawn";
     const auto report_failure = [&](std::string_view reason) {
+        diag_outcome = reason == "no pipeline" ? pipeline_cache.GraphicsMissReason()
+                       : reason == "configure failed" ? "configure-failed" : "mesh-disabled";
         static std::set<std::tuple<u64, u64, std::string_view>> seen;
         const auto& regs = maxwell3d->regs;
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
@@ -276,12 +441,21 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
                         regs.rt[0].Address(), regs.rt[0].width, regs.rt[0].height);
         }
     };
+    SCOPE_EXIT {
+        if (VideoCommon::Nx2Diag::Active()) {
+            DiagRecordDraw(*maxwell3d, *gpu_memory, diag_outcome, mesh_draw);
+        }
+    };
     GraphicsPipeline* const pipeline{[&] {
         Profile::Scope scope{Profile::Zone::PipelineLookup};
         return pipeline_cache.CurrentGraphicsPipeline();
     }()};
     if (!pipeline) {
         report_failure("no pipeline");
+        return;
+    }
+    if (!is_indexed && TryNx2IndirectReset()) {
+        submitted = true;
         return;
     }
     // Task/mesh pipelines: the draw's vertex count is the number of task workgroups.
@@ -328,9 +502,27 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     query_cache.NotifySegment(true);
     HandleTransformFeedback();
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
+    // EDEN_NX2_DIAG_SAMPLES: count the samples this draw passes while a draw list is captured. The
+    // game's own occlusion counting is left alone (one occlusion query can be active at a time).
+    int diag_query = -1;
+    if (VideoCommon::Nx2Diag::SamplesEnabled() && g_diag_pool != nullptr &&
+        !maxwell3d->regs.zpass_pixel_count_enable) {
+        diag_query = VideoCommon::Nx2Diag::Diagnostics::Get().NextQuery();
+    }
+    if (diag_query >= 0) {
+        scheduler.Record([pool = **g_diag_pool, diag_query](vk::CommandBuffer cmdbuf) {
+            cmdbuf.BeginQuery(pool, static_cast<u32>(diag_query), 0);
+        });
+    }
     {
         Profile::Scope scope{Profile::Zone::DrawRecord};
         draw_func();
+    }
+    if (diag_query >= 0) {
+        scheduler.Record([pool = **g_diag_pool, diag_query](vk::CommandBuffer cmdbuf) {
+            cmdbuf.EndQuery(pool, static_cast<u32>(diag_query));
+        });
+        g_diag_query = diag_query;
     }
     submitted = true;
     static u32 native_capture_count{};
@@ -460,6 +652,24 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+    {
+        // A draw's first and count can come from memory a skipped (rejected) compute program
+        // should have written. Past 16M vertices they are garbage: building the quad index
+        // buffer for one threw out of the GPU thread and ended the process (Hyrule Warriors:
+        // Age of Imprisonment, entering a new area), and indexed ones read far out of bounds.
+        const auto& state = maxwell3d->draw_manager.draw_state;
+        const u64 first = is_indexed ? state.index_buffer.first : state.vertex_buffer.first;
+        const u64 count = is_indexed ? state.index_buffer.count : state.vertex_buffer.count;
+        constexpr u64 MaxVertices = u64{1} << 24;
+        if (first + count > MaxVertices) {
+            static std::atomic<u32> skipped{};
+            if (skipped.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_WARNING(HW_GPU, "Draw skipped: {} {} from {} (vertex/index count past {})",
+                            count, is_indexed ? "indices" : "vertices", first, MaxVertices);
+            }
+            return;
+        }
+    }
     TraceWindowTarget(*maxwell3d, *gpu_memory, is_indexed ? "draw-indexed" : "draw",
                       is_indexed ? maxwell3d->draw_manager.draw_state.index_buffer.count
                                  : maxwell3d->draw_manager.draw_state.vertex_buffer.count);
@@ -555,6 +765,16 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
         if (std::find(skip_list.begin(), skip_list.end(), vs) != skip_list.end()) return;
     }
+    if (VideoCommon::Nx2Diag::Active()) {
+        const auto& draw_state = maxwell3d->draw_manager.draw_state;
+        g_diag_draw = {is_indexed ? "indexed" : "draw",
+                       is_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count,
+                       instance_count};
+        if (VideoCommon::Nx2Diag::Ablates() && DiagAblated(*maxwell3d)) {
+            DiagRecordDraw(*maxwell3d, *gpu_memory, "ablated", false);
+            return;
+        }
+    }
     // EDEN_NX2_RT_TRACE: log the first draw to every distinct colour target (debug aid).
     if (static const bool trace = std::getenv("EDEN_NX2_RT_TRACE") != nullptr; trace) {
         static std::set<std::tuple<GPUVAddr, u32, u32, u64, u64>> seen;
@@ -610,6 +830,13 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 void RasterizerVulkan::DrawIndirect() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     const auto& params = maxwell3d->draw_manager.indirect_state;
+    if (VideoCommon::Nx2Diag::Active()) {
+        g_diag_draw = {"indirect", static_cast<u32>(params.max_draw_counts), 0};
+        if (VideoCommon::Nx2Diag::Ablates() && DiagAblated(*maxwell3d)) {
+            DiagRecordDraw(*maxwell3d, *gpu_memory, "ablated", false);
+            return;
+        }
+    }
     buffer_cache.SetDrawIndirect(&params);
     PrepareDraw(params.is_indexed, [this, &params] {
         if (mesh_draw) {
@@ -1119,6 +1346,9 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
 }
 
 void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
+    if (Settings::values.skip_cpu_inner_invalidation.GetValue()) {
+        return;
+    }
     {
         std::scoped_lock lock{texture_cache.mutex};
         for (const auto& [addr, size] : sequences) {
@@ -1173,7 +1403,11 @@ bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
     if (addr == 0 || size == 0) return true;
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-        if (buffer_cache.IsRegionGpuModified(addr, size)) return false;
+        // WriteMemory downloads GPU-written bytes elsewhere on the written pages, which only the
+        // GPU thread may do: leave those pages to the fallback.
+        const DAddr page_begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
+        const DAddr page_end = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE);
+        if (buffer_cache.IsRegionGpuModified(page_begin, page_end - page_begin)) return false;
         texture_cache.WriteMemory(addr, size);
         buffer_cache.WriteMemory(addr, size);
     }
@@ -1192,7 +1426,7 @@ void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
     }
     {
         std::scoped_lock lock{buffer_cache.mutex};
-        buffer_cache.WriteMemory(addr, size);
+        buffer_cache.WriteMemory(addr, size, false);
     }
     pipeline_cache.OnCacheInvalidation(addr, size);
 }
@@ -1279,6 +1513,44 @@ void RasterizerVulkan::FlushCommands() {
 
 void RasterizerVulkan::TickFrame() {
     draw_counter = 0;
+    if (VideoCommon::Nx2Diag::Active()) {
+        auto& diag = VideoCommon::Nx2Diag::Diagnostics::Get();
+        if (const u32 count = diag.QueryCount(); diag.Capturing() && count > 0 && g_diag_pool != nullptr) {
+            // The capture ends here: wait for its draws and read what the probes counted.
+            scheduler.Finish();
+            std::vector<u64> samples(count);
+            const VkResult result = device.GetLogical().GetQueryResults(
+                **g_diag_pool, 0, count, sizeof(u64) * count, samples.data(), sizeof(u64),
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+            if (result == VK_SUCCESS) {
+                diag.SetSamples(std::move(samples));
+            } else {
+                LOG_ERROR(Render_Vulkan, "diag: reading the draw probe failed ({})", static_cast<int>(result));
+            }
+        }
+        diag.TickFrame();
+        if (diag.Capturing() && VideoCommon::Nx2Diag::SamplesEnabled()) {
+            // A capture just began: (re)create and reset the probe pool.
+            if (g_diag_pool == nullptr) {
+                g_diag_pool = new vk::QueryPool(device.GetLogical().CreateQueryPool({
+                    .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .queryType = VK_QUERY_TYPE_OCCLUSION,
+                    .queryCount = VideoCommon::Nx2Diag::MaxProbeQueries,
+                    .pipelineStatistics = 0,
+                }));
+            }
+            if (device.IsHostQueryResetSupported()) {
+                device.GetLogical().ResetQueryPool(**g_diag_pool, 0, VideoCommon::Nx2Diag::MaxProbeQueries);
+            } else {
+                scheduler.RequestOutsideRenderPassOperationContext();
+                scheduler.Record([pool = **g_diag_pool](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.ResetQueryPool(pool, 0, VideoCommon::Nx2Diag::MaxProbeQueries);
+                });
+            }
+        }
+    }
     pipeline_cache.TickFrame();
     guest_descriptor_queue.TickFrame();
     compute_pass_descriptor_queue.TickFrame();

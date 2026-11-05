@@ -124,7 +124,6 @@ void GpuSplit::MaybeStart(Core::System& system_) {
 }
 
 void GpuSplit::Stop() {
-    FlushMethodSequence();
     if (!back_thread.joinable()) {
         return;
     }
@@ -185,7 +184,6 @@ void GpuSplit::WaitForSpace(size_t words) {
 }
 
 void GpuSplit::Publish() {
-    FlushMethodSequence();
     if (published_local == write_position) {
         return;
     }
@@ -199,7 +197,6 @@ void GpuSplit::Publish() {
 }
 
 void GpuSplit::Drain() {
-    FlushMethodSequence();
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache == write_position) {
         return;
@@ -221,7 +218,6 @@ void GpuSplit::Drain() {
 }
 
 bool GpuSplit::WaitForWriters() {
-    FlushMethodSequence();
     const u64 target = std::min(last_writer_position, write_position);
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache >= target) {
@@ -244,7 +240,6 @@ bool GpuSplit::WaitForWriters() {
 }
 
 void GpuSplit::SwitchEngine(Tegra::Engines::EngineInterface* engine) {
-    FlushMethodSequence();
     front_engine = engine;
     u64* const entry = Reserve(2);
     entry[0] = static_cast<u64>(Kind::Engine);
@@ -254,7 +249,6 @@ void GpuSplit::SwitchEngine(Tegra::Engines::EngineInterface* engine) {
 
 void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, const u32* words,
                            u32 amount, u32 methods_pending, const GPUVAddr* segment) {
-    FlushMethodSequence();
     SelectEngine(engine);
     // Long runs (constant buffer and inline uploads) go in pieces, as when a method's data
     // continues in the next GPFIFO entry.
@@ -276,55 +270,6 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, 
         amount -= piece;
         methods_pending -= piece;
     }
-}
-
-bool GpuSplit::ShouldBatchMethod(Tegra::Engines::EngineInterface* engine, u32 method,
-                                 const GPUVAddr* segment) const {
-    return BatchRegisterWrites() && method < 0xe00 && segment == nullptr &&
-           method < engine->execution_mask.size() && !engine->execution_mask[method];
-}
-
-void GpuSplit::QueueMethodSequence(u32 method, u32 argument) {
-    if (method_sequence_count != 0 &&
-        (method != method_sequence_start + method_sequence_count ||
-         method_sequence_count == MaxSequenceMethods)) {
-        FlushMethodSequence();
-    }
-    if (method_sequence_count == 0) {
-        method_sequence_start = method;
-    }
-    method_sequence_values[method_sequence_count++] = argument;
-    if (method_sequence_count == MaxSequenceMethods) {
-        FlushMethodSequence();
-    }
-}
-
-void GpuSplit::FlushMethodSequence() {
-    const u32 count = method_sequence_count;
-    if (count == 0) {
-        return;
-    }
-    const u32 first_method = method_sequence_start;
-    method_sequence_count = 0;
-
-    if (count < MinSequenceMethods) {
-        for (u32 i = 0; i < count; ++i) {
-            u64* const entry = Reserve(1);
-            entry[0] = static_cast<u64>(Kind::Method) |
-                       (u64{(first_method + i) & 0xffff} << 8) |
-                       (u64{method_sequence_values[i]} << 32);
-            Commit(1);
-        }
-        return;
-    }
-
-    const size_t size = 1 + (count + 1) / 2;
-    u64* const entry = Reserve(size);
-    entry[0] = static_cast<u64>(Kind::MethodSequence) |
-               (u64{first_method & 0xffff} << 8) | (u64{count} << 32);
-    entry[size - 1] = 0;
-    std::memcpy(entry + 1, method_sequence_values.data(), size_t{count} * sizeof(u32));
-    Commit(size);
 }
 
 void GpuSplit::DeferFunction(std::function<void()>&& func) {
@@ -376,16 +321,6 @@ size_t GpuSplit::Execute(const u64* entry) {
         engine->CallMultiMethod(*system, method, reinterpret_cast<const u32*>(entry + data),
                                 amount, static_cast<u32>(entry[1]));
         return data + (amount + 1) / 2;
-    }
-    case Kind::MethodSequence: {
-        const u32 method = static_cast<u32>((head >> 8) & 0xffff);
-        const u32 amount = static_cast<u32>(head >> 32);
-        const auto* const values = reinterpret_cast<const u32*>(entry + 1);
-        auto* const engine = back_engine;
-        for (u32 i = 0; i < amount; ++i) {
-            engine->method_sink.emplace_back(method + i, values[i]);
-        }
-        return 1 + (amount + 1) / 2;
     }
     case Kind::Call: {
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
