@@ -90,7 +90,7 @@ bool DmaPusher::Step() {
     const size_t command_list_size = command_list.command_lists.size();
 
     if (prefetch_size == 0 && command_list_size == 0) {
-        dma_pushbuffer.pop();
+        dma_pushbuffer.pop_front();
         dma_pushbuffer_subindex = 0;
         return true;
     }
@@ -103,7 +103,7 @@ bool DmaPusher::Step() {
             return false;
         }
         command_resume_offset = 0;
-        dma_pushbuffer.pop();
+        dma_pushbuffer.pop_front();
         return true;
     }
 
@@ -188,7 +188,27 @@ bool DmaPusher::Step() {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
-        if (use_safe) {
+        // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
+        const bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&
+                               command_list.snapshot_suspensions ==
+                                   suspensions.load(std::memory_order_acquire) &&
+                               VideoCommon::CanUseSubmittedCommands(
+            command_resume_offset != 0,
+            dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+                !std::ranges::binary_search(command_list.deferred_entries,
+                                            static_cast<u32>(dma_pushbuffer_subindex)),
+            gpu_written,
+            use_safe && memory_manager.IsMemoryDirty(dma_state.dma_get,
+                                                     header.size * sizeof(u32)));
+        if (submitted) {
+            const std::span<const CommandHeader> commands{
+                command_list.submitted_words.data() +
+                    command_list.submitted_offsets[dma_pushbuffer_subindex],
+                header.size};
+            RecordParsedEntry(header, commands);
+            Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Submitted);
+            command_resume_offset += ProcessCommands(commands, 0);
+        } else if (use_safe) {
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::SafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             RecordParsedEntry(header, commands);
@@ -233,7 +253,7 @@ bool DmaPusher::Step() {
             }
         }
         parked_methods.clear();
-        dma_pushbuffer.pop();
+        dma_pushbuffer.pop_front();
         dma_pushbuffer_subindex = 0;
     } else {
         signal_sync = command_list.command_lists[dma_pushbuffer_subindex].sync && Settings::values.sync_memory_operations.GetValue();

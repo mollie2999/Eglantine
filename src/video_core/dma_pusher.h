@@ -13,6 +13,7 @@
 #include <span>
 #include <vector>
 #include <boost/container/small_vector.hpp>
+#include <deque>
 #include <queue>
 
 #include "common/bit_field.h"
@@ -118,6 +119,17 @@ struct CommandList final {
     boost::container::small_vector<CommandHeader, 512> prefetch_command_list;
     /// EDEN_NX2_PB_CHECK: hash of each entry's words when it was submitted.
     std::vector<u64> submit_hashes;
+    /// The entries' words when they were submitted (NX2), each entry's at submitted_offsets[i]:
+    /// executed instead of the memory, which the game may already be refilling for a later frame.
+    std::vector<CommandHeader> submitted_words;
+    std::vector<u32> submitted_offsets;
+    /// Entries (ascending) not copied when submitted, because a GPU map still queued covers them:
+    /// DmaPusher::Push copies them after the map, and until then they read memory.
+    std::vector<u32> deferred_entries;
+    /// DmaPusher::suspensions when the words were copied. A list copied during a suspension, or
+    /// that waited behind one, reads memory instead: games write the commands it runs before they
+    /// release the acquire.
+    u64 snapshot_suspensions = 0;
 };
 
 /// FNV-1a over pushbuffer words (EDEN_NX2_PB_CHECK).
@@ -136,14 +148,15 @@ inline u64 HashPushbufferWords(std::span<const u32> words) {
 /// details on this implementation.
 class DmaPusher final {
 public:
-    /// Counts suspensions on a semaphore acquire and the resumes after them.
+    /// Counts suspensions on a semaphore acquire and the resumes after them, so it is odd while
+    /// the channel is suspended (see CommandList::snapshot_suspensions).
     std::atomic<u64> suspensions{0};
 
     explicit DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Control::ChannelState& channel_state_);
     ~DmaPusher();
 
     void Push(CommandList&& entries) {
-        dma_pushbuffer.push(std::move(entries));
+        dma_pushbuffer.push_back(std::move(entries));
     }
 
     void DispatchCalls();
@@ -201,7 +214,7 @@ private:
 public:
     Common::ScratchBuffer<CommandHeader> command_headers; ///< Buffer for list of commands fetched at once
 
-    std::queue<CommandList> dma_pushbuffer; ///< Queue of command lists to be processed
+    std::deque<CommandList> dma_pushbuffer; ///< Queue of command lists to be processed
     std::size_t dma_pushbuffer_subindex{};  ///< Index within a command list within the pushbuffer
 
     struct DmaState {
