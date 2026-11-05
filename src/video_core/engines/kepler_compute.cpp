@@ -652,14 +652,19 @@ bool KeplerCompute::ProcessGameDlss(u64 program_id, u64 native_key) {
 // The game's own DLSS network (its translated programs) is shown once every pass of an
 // evaluation has run several times in a row and its output has passed several health checks in
 // a row. Until then, when any pass can't run, and for the rest of the session once the network
-// fails its checks, the replacement upscale draws over the output pass's result. NVIDIA DLSS on
-// or EDEN_NX2_DLSS_REPLACEMENT=fsr|standin keep the replacement. The network's image sizes are
-// fixed by the game, so it is used only without resolution scaling; its matrix multiplies need
-// shaders 32 threads wide.
+// fails its checks, the replacement upscale draws over the output pass's result. The setting
+// "Use the game's own DLSS" defaults off; an explicit native override enables it, while fsr/dlss
+// overrides keep the replacement. The network's image sizes are fixed by the game, so it is used
+// only without resolution scaling; its matrix multiplies need shaders 32 threads wide.
 VideoCore::GameDlssReason KeplerCompute::GameDlssBlocker() const {
     using VideoCore::GameDlssReason;
     static const char* const option = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
-    if (option && std::string_view{option} != "native") {
+    const bool forced_replacement = option && VideoCommon::FireEmblemUpscale::UseReplacement(
+        VideoCommon::FireEmblemUpscale::ProgramId,
+        VideoCommon::FireEmblemUpscale::OutputProgramKey, option);
+    const bool forced_native = option && !forced_replacement;
+    if (forced_replacement ||
+        (!forced_native && !Settings::values.game_dlss_network.GetValue())) {
         return GameDlssReason::TurnedOff;
     }
     // NVIDIA DLSS, when turned on and running, comes first.

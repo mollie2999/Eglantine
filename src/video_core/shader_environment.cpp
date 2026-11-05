@@ -37,6 +37,7 @@
 #include "shader_recompiler/frontend/ampere/program_address_map.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/textures/texture.h"
@@ -58,6 +59,12 @@ static u64 NativeShaderHash(std::span<const u64> code) {
 
 static u64 MakeCbufKey(u32 index, u32 offset) {
     return (static_cast<u64>(index) << 32) | offset;
+}
+
+// Pointer-table entries share the classification map with plain constant buffer pointers.
+static u64 MakeIndirectCbufKey(u32 index, u32 offset, u32 indirect) {
+    return (u64{1} << 63) | (static_cast<u64>(indirect & 0x3fffff) << 40) |
+           MakeCbufKey(index, offset);
 }
 
 static Shader::TextureType ConvertTextureType(const Tegra::Texture::TICEntry& entry) {
@@ -90,20 +97,6 @@ static Shader::TexturePixelFormat ConvertTexturePixelFormat(const Tegra::Texture
     return static_cast<Shader::TexturePixelFormat>(
         PixelFormatFromTextureInfo(entry.format, entry.r_type, entry.g_type, entry.b_type,
                                    entry.a_type, entry.srgb_conversion));
-}
-
-// This must match TextureCacheRuntime's fallback for NULL_IMAGE_VIEW_ID. Pipeline construction
-// resolves texture type and format before the texture cache binds the view. An out-of-range TIC
-// is bound as that null view, so arbitrary bytes after the pool must not reach the compiler.
-static Tegra::Texture::TICEntry NullTextureInfo() {
-    Tegra::Texture::TICEntry entry{};
-    entry.format.Assign(Tegra::Texture::TextureFormat::A8B8G8R8);
-    entry.r_type.Assign(Tegra::Texture::ComponentType::UNORM);
-    entry.g_type.Assign(Tegra::Texture::ComponentType::UNORM);
-    entry.b_type.Assign(Tegra::Texture::ComponentType::UNORM);
-    entry.a_type.Assign(Tegra::Texture::ComponentType::UNORM);
-    entry.texture_type.Assign(Tegra::Texture::TextureType::Texture2D);
-    return entry;
 }
 
 static std::string_view StageToPrefix(Shader::Stage stage) {
@@ -211,6 +204,25 @@ bool GenericEnvironment::IsCbufStorageBufferPointer(u32 index, u32 offset) {
                         (u64{ReadCbufValue(index, offset + 4)} << 32);
     const bool mapped = address != 0 && gpu_memory->IsWithinGPUAddressRange(address) &&
                         gpu_memory->IsFullyMappedRange(address, 1);
+    storage_pointer_types.emplace(key, static_cast<u8>(mapped));
+    return mapped;
+}
+
+bool GenericEnvironment::IsCbufIndirectStorageBufferPointer(u32 index, u32 offset, u32 indirect) {
+    const u64 key = MakeIndirectCbufKey(index, offset, indirect);
+    if (const auto it = storage_pointer_types.find(key); it != storage_pointer_types.end()) {
+        return it->second != 0;
+    }
+    bool mapped = false;
+    if (IsCbufStorageBufferPointer(index, offset)) {
+        const u64 holder =
+            u64{ReadCbufValue(index, offset)} | (u64{ReadCbufValue(index, offset + 4)} << 32);
+        if (gpu_memory->IsFullyMappedRange(holder + indirect, sizeof(u64))) {
+            const u64 address = gpu_memory->Read<u64>(holder + indirect);
+            mapped = address != 0 && gpu_memory->IsWithinGPUAddressRange(address) &&
+                     gpu_memory->IsFullyMappedRange(address, 1);
+        }
+    }
     storage_pointer_types.emplace(key, static_cast<u8>(mapped));
     return mapped;
 }
@@ -373,17 +385,7 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
     const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
                                                        gpu_memory->UsesNativeTiling())};
-    if (index > tic_limit) {
-        static std::atomic<u32> invalid_tics{};
-        if (invalid_tics.fetch_add(1, std::memory_order_relaxed) < 64) {
-            LOG_WARNING(HW_GPU,
-                        "Invalid shader TIC: program={:#x} stage={} raw_handle={:#x} index={} "
-                        "limit={} via_header_index={} native_tiling={}",
-                        program_base, static_cast<u32>(stage), raw, index, tic_limit,
-                        via_header_index, gpu_memory->UsesNativeTiling());
-        }
-        return NullTextureInfo();
-    }
+    ASSERT(index <= tic_limit);
     const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
     Tegra::Texture::TICEntry entry;
     gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
@@ -674,6 +676,15 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
         for (const u64 hash : {result->native_program_key, NativeShaderHash(lowered_code)}) {
             if (reject_hashes.find(fmt::format(",{:016x},", hash)) != std::string::npos) {
                 throw Shader::RuntimeError("Native shader at {:#x} ({:016x}) rejected by EDEN_NX2_REJECT_HASH",
+                                           program_base, hash);
+            }
+        }
+    }
+    // The same list, changed at runtime by the debug server (docs/nx2/debug-mcp.md).
+    if (VideoCore::Nx2Debug::AnyRejected()) {
+        for (const u64 hash : {result->native_program_key, NativeShaderHash(lowered_code)}) {
+            if (VideoCore::Nx2Debug::IsRejected(hash)) {
+                throw Shader::RuntimeError("Native shader at {:#x} ({:016x}) rejected by the debug server",
                                            program_base, hash);
             }
         }
@@ -1123,6 +1134,14 @@ bool FileEnvironment::IsCbufStorageBufferPointer(u32 index, u32 offset) {
     const auto it = storage_pointer_types.find(MakeCbufKey(index, offset));
     if (it == storage_pointer_types.end()) {
         throw Shader::LogicError("Uncached storage pointer classification");
+    }
+    return it->second != 0;
+}
+
+bool FileEnvironment::IsCbufIndirectStorageBufferPointer(u32 index, u32 offset, u32 indirect) {
+    const auto it = storage_pointer_types.find(MakeIndirectCbufKey(index, offset, indirect));
+    if (it == storage_pointer_types.end()) {
+        throw Shader::LogicError("Uncached storage pointer table classification");
     }
     return it->second != 0;
 }
