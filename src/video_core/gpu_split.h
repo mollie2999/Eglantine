@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -85,6 +87,11 @@ public:
     void Method(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument, bool is_last,
                 const GPUVAddr* segment) {
         SelectEngine(engine);
+        if (ShouldBatchMethod(engine, method, segment)) {
+            QueueMethodSequence(method, argument);
+            return;
+        }
+        FlushMethodSequence();
         const size_t words = segment != nullptr ? 2 : 1;
         u64* const entry = Reserve(words);
         entry[0] = static_cast<u64>(Kind::Method) | (is_last ? IsLast : 0) |
@@ -99,6 +106,7 @@ public:
                      u32 amount, u32 methods_pending, const GPUVAddr* segment);
     /// A write made by a macro: CallMethod without the method sink, as the engines' macros do.
     void MacroWrite(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument) {
+        FlushMethodSequence();
         SelectEngine(engine);
         u64* const entry = Reserve(1);
         entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
@@ -110,6 +118,7 @@ public:
     template <typename Func>
     void Defer(const Func& func) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
+        FlushMethodSequence();
         constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
         u64* const entry = Reserve(2 + payload);
         entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
@@ -131,6 +140,7 @@ public:
 
     /// Compute or copy work was just sent: what can write GPU-written command lists.
     void NoteWriter() {
+        FlushMethodSequence();
         last_writer_position = write_position;
     }
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
@@ -144,6 +154,7 @@ private:
         Method, ///< Bits 8-23 method, 32-63 argument; flags IsLast, HasSegment (word 1)
         Multi,  ///< Bits 8-23 method, 32-63 amount; word 1 methods pending, [segment], words
         Call,   ///< Bits 8-31 payload size in words; word 1 thunk, then the payload
+        MethodSequence, ///< Consecutive sunk registers: start method, count, then packed values
     };
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
@@ -152,6 +163,8 @@ private:
     static constexpr size_t RingWords = size_t{1} << 20; // 8 MiB
     static constexpr size_t RingMask = RingWords - 1;
     static constexpr u32 MaxMultiWords = 8192;
+    static constexpr u32 MaxSequenceMethods = 256;
+    static constexpr u32 MinSequenceMethods = 4;
     static constexpr size_t PublishEvery = 256;
 
     template <typename Func>
@@ -185,6 +198,17 @@ private:
 
     void BackLoop(std::stop_token stop_token);
     size_t Execute(const u64* entry);
+    static bool BatchRegisterWrites() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_SPLIT_BATCH_METHODS");
+            return value != nullptr && value[0] != '0';
+        }();
+        return enabled;
+    }
+    bool ShouldBatchMethod(Tegra::Engines::EngineInterface* engine, u32 method,
+                           const GPUVAddr* segment) const;
+    void QueueMethodSequence(u32 method, u32 argument);
+    void FlushMethodSequence();
 
     Core::System* system{};
     bool active{};
@@ -199,6 +223,9 @@ private:
     /// Words between publishes: small right after a drain, while the back has nothing to do.
     size_t publish_every{PublishEvery};
     Tegra::Engines::EngineInterface* front_engine{};
+    u32 method_sequence_start{};
+    u32 method_sequence_count{};
+    std::array<u32, MaxSequenceMethods> method_sequence_values{};
 
     // Back side.
     Tegra::Engines::EngineInterface* back_engine{};
