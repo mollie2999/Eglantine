@@ -30,6 +30,8 @@ namespace Tegra {
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
 
+namespace {
+
 bool MayWriteCommandList(Engines::EngineInterface& engine, Engines::EngineTypes type,
                          u32 method, bool is_last_call) {
     switch (type) {
@@ -48,6 +50,8 @@ bool MayWriteCommandList(Engines::EngineInterface& engine, Engines::EngineTypes 
         return false;
     }
 }
+
+} // Anonymous namespace
 
 DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Control::ChannelState& channel_state_)
     : system{system_}
