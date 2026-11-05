@@ -30,6 +30,25 @@ namespace Tegra {
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
 
+bool MayWriteCommandList(Engines::EngineInterface& engine, Engines::EngineTypes type,
+                         u32 method, bool is_last_call) {
+    switch (type) {
+    case Engines::EngineTypes::KeplerCompute: {
+        const auto& compute = static_cast<const Engines::KeplerCompute&>(engine);
+        // 0xAF is the legacy launch register and a native QMD signal. Native QMD dispatches
+        // can also be triggered at 0xB0; native macros may emit either launch sequence.
+        return method == KEPLER_COMPUTE_REG_INDEX(launch) ||
+               (compute.IsNativeMode() &&
+                (method == 0xB0 || (method >= MacroRegistersStart && is_last_call)));
+    }
+    case Engines::EngineTypes::MaxwellDMA:
+        // MaxwellDMA's execution mask contains only launch_dma, where the copy actually runs.
+        return method < engine.execution_mask.size() && engine.execution_mask[method];
+    default:
+        return false;
+    }
+}
+
 DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Control::ChannelState& channel_state_)
     : system{system_}
     , memory_manager{memory_manager_}
@@ -162,7 +181,8 @@ bool DmaPusher::Step() {
         // billions of instances and lost the device loading a race).
         bool gpu_written =
             IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+        if (header.size <= 8 && command_resume_offset == 0 && !gpu_written &&
+            VideoCommon::GpuSplit::Get().Active() &&
             VideoCommon::GpuSplit::Get().WaitForWriters()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
@@ -429,10 +449,11 @@ void DmaPusher::CallMethod(u32 argument) {
             ReportUnboundSubchannel();
             return;
         }
-        // Compute dispatches and DMA copies write the command lists ReadGpuWrittenCommands reads.
         const auto engine_type = subchannel_type[dma_state.subchannel];
-        const bool writer = engine_type == Engines::EngineTypes::KeplerCompute ||
-                            engine_type == Engines::EngineTypes::MaxwellDMA;
+        // Register setup does not write command lists. Advance this wait point only for dispatch,
+        // copy, native QMD signal, or completed native macro methods that can launch those writes.
+        const bool writer = MayWriteCommandList(*subchannel, engine_type, dma_state.method,
+                                                dma_state.is_last_call);
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
@@ -488,10 +509,10 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
             ReportUnboundSubchannel();
             return;
         }
-        // Compute dispatches and DMA copies write the command lists ReadGpuWrittenCommands reads.
         const auto engine_type = subchannel_type[dma_state.subchannel];
-        const bool writer = engine_type == Engines::EngineTypes::KeplerCompute ||
-                            engine_type == Engines::EngineTypes::MaxwellDMA;
+        const bool completes_method = dma_state.method_count <= num_methods;
+        const bool writer = MayWriteCommandList(*subchannel, engine_type, dma_state.method,
+                                                completes_method);
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
