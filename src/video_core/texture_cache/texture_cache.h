@@ -449,7 +449,10 @@ void TextureCache<P>::TickFrame() {
         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
         images_created = images_deleted = 0;
     }
-    if (total_used_memory > minimum_memory) {
+    // Native titles frequently reuse textures after 50 frames. Keep them while the device is
+    // below its pressure threshold instead of evicting and uploading them repeatedly.
+    const u64 collection_threshold = native_thresholds_applied ? expected_memory : minimum_memory;
+    if (total_used_memory > collection_threshold) {
         RunGarbageCollector();
     }
     sentenced_images.Tick();
