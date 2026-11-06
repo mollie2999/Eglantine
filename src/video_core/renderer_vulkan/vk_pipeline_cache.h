@@ -10,7 +10,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
-#include <deque>
 #include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
@@ -131,8 +130,6 @@ public:
         return graphics_miss;
     }
 
-    void TickFrame();
-
     [[nodiscard]] ComputePipeline* CurrentComputePipeline();
 
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
@@ -185,12 +182,6 @@ private:
     GraphicsPipeline* current_pipeline{};
     mutable const char* graphics_miss{"no-pipeline"};
 
-    /// Destroys graphics pipelines unused for a while, once the GPU is done with them.
-    void EvictUnusedPipelines();
-    u64 frame_count{};
-    std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
-    std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
-
     ::Common::unordered_map<ComputePipelineCacheKey, ComputePipelineCacheEntry> compute_cache;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
 
@@ -205,7 +196,7 @@ private:
     /// (used_pipelines) are built at boot; the rest are built when first needed, and not stored
     /// again. Each built pipeline holds driver memory (title 1: 6.5k cached, a quarter used).
     std::unordered_set<u64> disk_pipelines;
-    std::unordered_map<u64, u8> used_pipelines; ///< Key hash -> sessions since it was last used
+    std::unordered_map<u64, u8> used_pipelines; ///< Key hashes retained for later preloading
     std::unordered_set<const GraphicsPipeline*> used_this_session;
     std::filesystem::path used_pipelines_filename;
     std::chrono::steady_clock::time_point used_pipelines_saved{};
