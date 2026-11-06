@@ -602,23 +602,11 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
 }
 
 namespace {
-// <title>/vulkan_used.bin: the graphics pipelines recent sessions used, as key hash + sessions
-// since the last use.
+// <title>/vulkan_used.bin: graphics pipeline hashes used by this title. They are retained so a
+// previously visited area can be preloaded on a later launch rather than stuttering as its
+// pipelines are rebuilt on demand.
 constexpr u32 UsedPipelinesMagic = 0x31505545; // "EUP1"
-// Pipelines the last two sessions used are built at boot. Each holds ~0.45 MB of driver memory:
-// title 1 built 4,800 from eight sessions, 1.5 GB more than building them on first use (but that
-// stalled frames 4x as often), while one session of its title screen uses ~1,500.
-// MoltenVK keeps the previous eight sessions: a pipeline built while playing goes through
-// SPIR-V -> MSL -> Metal, far more than the 2-3 ms the shorter window assumes, so each one
-// built at boot is a stutter avoided.
-constexpr u8 UsedPipelinesMaxAge = 2;
-constexpr u8 UsedPipelinesMaxAgeMoltenVK = 8;
-
-u8 MaxUsedPipelineAge(const Device& device) {
-    return device.IsMoltenVK() ? UsedPipelinesMaxAgeMoltenVK : UsedPipelinesMaxAge;
-}
-
-std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path, u8 max_age) {
+std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path) {
     std::unordered_map<u64, u8> used;
     std::ifstream file{path, std::ios::binary};
     u32 magic{}, count{};
@@ -634,9 +622,7 @@ std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path,
             !file.read(reinterpret_cast<char*>(&age), sizeof(age))) {
             break;
         }
-        if (age < max_age) { // lists saved with a longer window
-            used.emplace(hash, age);
-        }
+        used.emplace(hash, age);
     }
     return used;
 }
@@ -670,8 +656,7 @@ void PipelineCache::SaveUsedPipelines() {
     used_pipelines_saved = std::chrono::steady_clock::now();
     // A session too short to say what the game uses (a boot to the menu) keeps the old list.
     constexpr size_t MinimumUsed = 64;
-    if (used_pipelines_filename.empty() ||
-        used_this_session.size() + used_and_evicted.size() < MinimumUsed) {
+    if (used_pipelines_filename.empty() || used_this_session.size() < MinimumUsed) {
         return;
     }
     std::unordered_map<u64, u8> next;
@@ -681,13 +666,8 @@ void PipelineCache::SaveUsedPipelines() {
             next.emplace(key.Hash(), u8{0});
         }
     }
-    for (const u64 hash : used_and_evicted) {
-        next.emplace(hash, u8{0});
-    }
     for (const auto& [hash, age] : used_pipelines) {
-        if (age + 1 < MaxUsedPipelineAge(device)) {
-            next.try_emplace(hash, static_cast<u8>(age + 1));
-        }
+        next.try_emplace(hash, age);
     }
     std::ofstream file{used_pipelines_filename, std::ios::binary | std::ios::trunc};
     const u32 count = static_cast<u32>(next.size());
@@ -720,7 +700,6 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
             current_pipeline = next;
-            current_pipeline->MarkUsed(frame_count);
             return BuiltPipeline(current_pipeline);
         }
     }
@@ -769,7 +748,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }
     pipeline_cache_filename = base_dir / "vulkan.bin";
     used_pipelines_filename = base_dir / "vulkan_used.bin";
-    used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
+    used_pipelines = LoadUsedPipelines(used_pipelines_filename);
     used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
     size_t queued_graphics = 0;
@@ -1004,61 +983,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
         current_pipeline->AddTransition(pipeline.get());
     }
     current_pipeline = pipeline.get();
-    current_pipeline->MarkUsed(frame_count);
     return BuiltPipeline(current_pipeline);
-}
-
-void PipelineCache::TickFrame() {
-    ++frame_count;
-    while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
-        evicted_pipelines.pop_front();
-    }
-    constexpr u64 EvictCheckFrames = 600;
-    if (frame_count % EvictCheckFrames == 0) {
-        EvictUnusedPipelines();
-    }
-}
-
-void PipelineCache::EvictUnusedPipelines() {
-    // Building a pipeline again on MoltenVK means a Metal compile mid-game, far dearer than the
-    // 2-3 ms below, so none are evicted there.
-    if (device.IsMoltenVK()) {
-        return;
-    }
-    // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
-    // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
-    // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
-    constexpr u64 EvictAfterFrames = 9000;
-    if (frame_count <= EvictAfterFrames) {
-        return;
-    }
-    const u64 cutoff = frame_count - EvictAfterFrames;
-    const u64 tick = scheduler.CurrentTick();
-    size_t evicted = 0;
-    for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
-        GraphicsPipeline* const pipeline = it->second.get();
-        if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
-            pipeline->LastUse() >= cutoff) {
-            ++it;
-            continue;
-        }
-        if (used_this_session.erase(pipeline) != 0) {
-            used_and_evicted.insert(it->first.Hash());
-        }
-        evicted_pipelines.emplace_back(tick, std::move(it->second));
-        it = graphics_cache.erase(it);
-        ++evicted;
-    }
-    if (evicted == 0) {
-        return;
-    }
-    for (auto& [key, pipeline] : graphics_cache) {
-        if (pipeline) {
-            pipeline->ClearTransitions();
-        }
-    }
-    LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left", evicted,
-             EvictAfterFrames, graphics_cache.size());
 }
 
 GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const noexcept {
