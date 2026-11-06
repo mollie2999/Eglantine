@@ -7,18 +7,18 @@
 -->
 
 <p align="center">
-  <img src="dist/branding/lichii_icon_with_logo.png" alt="Lichii" width="600">
+  <strong>Eglantine</strong>
 </p>
 
-# Lichii
+# Eglantine
 
-Lichii is an experimental, open-source Nintendo Switch and Switch 2 emulator written in C++. It builds on Eglantine, Eden, yuzu and Sudachi, preserving their contributions while developing this fork's game compatibility and renderer fixes.
+Eglantine is an experimental, open-source Nintendo Switch and Switch 2 emulator written in C++. This fork builds on Eglantine, Eden, yuzu and Sudachi, and includes compatibility and renderer fixes from their contributors.
 
-This is an independent fork, not an official release of those upstream projects. Lichii is not affiliated with Nintendo.
+This is an independent fork, not an official release of those upstream projects. Eglantine is not affiliated with Nintendo.
 
 ## Downloads and setup
 
-Published builds belong on this fork's [releases page](https://github.com/zortos293/Eglantine/releases). The repository still uses its historical Eglantine name; the desktop application is now Lichii.
+Published builds are available on this fork's [releases page](https://github.com/mollie2999/Eglantine/releases).
 
 On Windows, extract the entire build archive and run **lichii.exe**. Only use games and system files you have legally obtained. Games, keys and firmware are not included.
 
@@ -30,7 +30,7 @@ The rebrand intentionally retains the existing Eden/Eglantine data directories a
 
 Compatibility and performance vary by game, hardware and driver. Rendering errors, stutters and crashes remain possible. Passing automated tests does not establish that a game renders correctly, and this project makes no universal frame-rate guarantee.
 
-When [reporting an issue](https://github.com/zortos293/Eglantine/issues), include:
+When [reporting an issue](https://github.com/mollie2999/Eglantine/issues), include:
 
 - The exact build, game version, CPU, GPU and driver version.
 - Relevant settings and steps to reproduce the problem.
@@ -48,9 +48,9 @@ Keep changes focused and distinguish code-level checks from actual gameplay test
 Art created by YOB (yobslab)
 The supplied Lichii logo, icon and library artwork are in [dist/branding](dist/branding). Windows, Linux and macOS icon resources are generated from that artwork by [Generate-LichiiIcons.ps1](tools/Generate-LichiiIcons.ps1).
 
-## Support Lichii
+## Support
 
-Lichii is free and stays free. If you want to help, you can donate in crypto. Donations help pay for the AI tools and build machines used to develop this open-source project faster.
+Eglantine is free and stays free. If you want to help, you can donate in crypto. Donations help pay for the AI tools and build machines used to develop this open-source project faster.
 
 **Solana (SOL)**
 ```text
@@ -84,6 +84,6 @@ Send each coin on its matching network. Coins sent on the wrong network can't be
 
 ## Credits and license
 
-Lichii inherits the work of the Eglantine, Eden, yuzu and Sudachi projects and their contributors, including Eglantine's original developer Camille LaVey. Original copyright notices and third-party licenses are retained.
+Eglantine inherits the work of the Eglantine, Eden, yuzu and Sudachi projects and their contributors, including Eglantine's original developer Camille LaVey. Original copyright notices and third-party licenses are retained.
 
 See [LICENSE.txt](LICENSE.txt) and the source files for applicable license terms.
