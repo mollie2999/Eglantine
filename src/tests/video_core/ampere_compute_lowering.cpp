@@ -87,14 +87,29 @@ TEST_CASE("Ampere guarded UIADD3 lowers to a guarded IADD32I or IADD", "[video_c
     }
 }
 
-TEST_CASE("Ampere DEPBAR.LE with any scoreboard and wait list is a no-op", "[video_core][ampere]") {
+TEST_CASE("Ampere DEPBAR.LE preserves shared visibility for SB0 wait lists", "[video_core][ampere]") {
     // DEPBAR.LE SB5, 0x1 and DEPBAR.LE SB0, 0x0, {3,2,1} (Pokemon Pokopia's photo compute shaders).
-    for (const u32 word : {0x0000d040U, 0x0000800eU}) {
+    for (const u32 word : {0x0000d040U, 0x0000800eU, 0x00008000U, 0x00008fffU, 0x0000ffffU}) {
         const std::array<Instruction, 2> code{{{{0x0000791a, word, 0, 0x000fce00}}, Exit}};
         const auto lowered = LowerToMaxwell(code);
         INFO(lowered.error);
         REQUIRE(static_cast<bool>(lowered));
-        REQUIRE(lowered.instructions.size() == LowerToMaxwell(std::array{Exit}).instructions.size());
+        REQUIRE(lowered.instructions.size() == 1);
+        REQUIRE(lowered.instructions.back() == 0xe30000000007000fULL);
+        const Instruction copy{{0x02067fae, 0, 0x0f901c08, 0}};
+        const auto copying = LowerToMaxwell(std::array{copy, code[0], Exit});
+        INFO(copying.error);
+        REQUIRE(copying);
+        const bool shared_wait = (word & 0x7000U) == 0;
+        REQUIRE(std::count(copying.instructions.begin(), copying.instructions.end(),
+                           0xef98000000070000ULL) == (shared_wait ? 1 : 0));
+        REQUIRE(copying.source_instruction_offsets[2] - copying.source_instruction_offsets[1] ==
+                (shared_wait ? 1 : 0));
+        if (shared_wait) {
+            REQUIRE(copying.instructions[copying.source_instruction_offsets[1]] ==
+                    0xef98000000070000ULL);
+        }
+        REQUIRE(copying.instructions.back() == 0xe30000000007000fULL);
     }
 }
 
