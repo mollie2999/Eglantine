@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <unordered_set>
 #include <algorithm>
 #include <cstdlib>
 #include <array>
@@ -676,6 +677,8 @@ private:
     std::vector<u8> guest_uint8_indices;
     /// Guest memory large uploads came from since the last cold hint (device address, size).
     std::vector<std::pair<DAddr, u64>> uploaded_buffer_ranges;
+    /// Native 64 KiB uniform banks re-uploaded this frame (EDEN_NX2_BANK_REUPLOAD).
+    std::unordered_set<DAddr> native_indirect_uniforms_this_frame;
 
     struct LRUItemParams {
         using ObjectType = BufferId;
