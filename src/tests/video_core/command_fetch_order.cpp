@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <thread>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 
@@ -100,4 +101,45 @@ TEST_CASE("Synchronization failure cannot fall through to stale command words",
         [&] { flushed = true; }), int);
     REQUIRE_FALSE(checked);
     REQUIRE_FALSE(flushed);
+}
+
+TEST_CASE("GPU-written page marks cover word and address-space boundaries",
+          "[video_core][command_fetch_order]") {
+    constexpr u64 page_size = 4096;
+    Tegra::Nx2ClearGpuWrittenPages();
+    Tegra::Nx2MarkGpuWritten(63 * page_size + 100, 66 * page_size);
+    REQUIRE_FALSE(Tegra::Nx2IsGpuWritten(62 * page_size));
+    for (u64 page = 63; page <= 129; ++page) {
+        CAPTURE(page);
+        REQUIRE(Tegra::Nx2IsGpuWritten(page * page_size));
+    }
+    REQUIRE_FALSE(Tegra::Nx2IsGpuWritten(130 * page_size));
+    constexpr u64 last_page = (u64{1} << 36) - page_size;
+    Tegra::Nx2MarkGpuWritten(last_page, 2 * page_size);
+    REQUIRE(Tegra::Nx2IsGpuWritten(last_page));
+    REQUIRE_FALSE(Tegra::Nx2IsGpuWritten(u64{1} << 36));
+    Tegra::Nx2ClearGpuWrittenPages();
+}
+
+TEST_CASE("Concurrent GPU-written page marks retain every range", "[video_core][command_fetch_order]") {
+    constexpr u64 page_size = 4096;
+    constexpr u64 page_count = 512;
+    Tegra::Nx2ClearGpuWrittenPages();
+    std::array<std::thread, 8> writers;
+    for (u64 writer = 0; writer < writers.size(); ++writer) {
+        writers[writer] = std::thread([writer] {
+            for (u64 i = 0; i < 1000; ++i) {
+                const u64 page = (i * 37 + writer * 101) % page_count;
+                Tegra::Nx2MarkGpuWritten(page * page_size, page_size);
+            }
+        });
+    }
+    for (auto& writer : writers) {
+        writer.join();
+    }
+    for (u64 page = 0; page < page_count; ++page) {
+        CAPTURE(page);
+        REQUIRE(Tegra::Nx2IsGpuWritten(page * page_size));
+    }
+    Tegra::Nx2ClearGpuWrittenPages();
 }
