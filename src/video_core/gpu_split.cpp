@@ -117,15 +117,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
-    // Raiders' squid form fails when its macros run on the split front thread. The same
-    // scene works with the split active and macros on the back (mode 1), so keep that
-    // ordering for this title while the front-macro regression is investigated.
-    constexpr u64 SplatoonRaidersProgramId = 0x0400380020056000ULL;
-    const bool raiders = system_.GetApplicationProcessProgramID() == SplatoonRaidersProgramId;
-    front_macros = mode == '2' && !raiders && (jit == nullptr || jit[0] != '0');
-    if (mode == '2' && raiders) {
-        LOG_INFO(HW_GPU, "GPU thread split: using back-thread macros for Splatoon Raiders");
-    }
+    front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
              front_macros ? ", macros on the first" : "");
 }
