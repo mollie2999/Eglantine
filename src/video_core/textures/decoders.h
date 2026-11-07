@@ -40,6 +40,12 @@ void SwizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_p
 std::size_t CalculateSize(bool tiled, u32 bytes_per_pixel, u32 width, u32 height, u32 depth,
                           u32 block_height, u32 block_depth);
 
+/// Uses a paired-row fast path for native tiled images when possible.
+void UnswizzleTextureNativeFast(std::span<u8> output, std::span<const u8> input,
+                                u32 bytes_per_pixel, u32 width, u32 height, u32 depth,
+                                u32 block_height, u32 block_depth, u32 stride_alignment,
+                                bool native_tiling);
+
 /// Copies an untiled subrectangle into a tiled surface.
 void SwizzleSubrect(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,
                     u32 height, u32 depth, u32 origin_x, u32 origin_y, u32 extent_x, u32 extent_y,

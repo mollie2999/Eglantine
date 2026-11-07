@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <span>
 
 #include "common/alignment.h"
@@ -159,6 +160,42 @@ void SwizzleSubrectImpl(std::span<u8> output, std::span<const u8> input, u32 wid
     }
 }
 
+void UnswizzleNativePairs(std::span<u8> output, std::span<const u8> input, u32 width, u32 height,
+                          u32 depth, u32 block_height, u32 block_depth, u32 stride) {
+    constexpr u32 BYTES_PER_PIXEL = 16;
+    const u32 pitch = width * BYTES_PER_PIXEL;
+    const u32 gobs_in_x = Common::DivCeilLog2(stride, GOB_SIZE_X_SHIFT);
+    const u32 block_size = gobs_in_x << (GOB_SIZE_SHIFT + block_height + block_depth);
+    const u32 slice_size =
+        Common::DivCeilLog2(height, block_height + GOB_SIZE_Y_SHIFT) * block_size;
+    const u32 block_height_mask = (1U << block_height) - 1;
+    const u32 block_depth_mask = (1U << block_depth) - 1;
+    const u32 x_shift = GOB_SIZE_SHIFT + block_height + block_depth;
+    for (u32 slice = 0; slice < depth; ++slice) {
+        const u32 z = slice;
+        const u32 offset_z = (z >> block_depth) * slice_size +
+                             ((z & block_depth_mask) << (GOB_SIZE_SHIFT + block_height));
+        for (u32 line = 0; line < height; line += 2) {
+            const u32 swizzled_y = pdep<SWIZZLE_Y_BITS>(line);
+            const u32 block_y = line >> GOB_SIZE_Y_SHIFT;
+            const u32 offset_y = (block_y >> block_height) * block_size +
+                                 ((block_y & block_height_mask) << GOB_SIZE_SHIFT);
+            u32 swizzled_x = 0;
+            for (u32 column = 0; column < width;
+                 ++column, incrpdep<SWIZZLE_X_BITS, BYTES_PER_PIXEL>(swizzled_x)) {
+                const u32 x = column * BYTES_PER_PIXEL;
+                const u32 offset_x = (x >> GOB_SIZE_X_SHIFT) << x_shift;
+                const u32 source = NativeGobOffset(
+                    offset_z + offset_y + offset_x + (swizzled_x | swizzled_y), true);
+                const u32 dest = slice * pitch * height + line * pitch + x;
+                // The adjacent row's 16-byte segment follows this one within the GOB.
+                std::memcpy(&output[dest], &input[source], 16);
+                std::memcpy(&output[dest + pitch], &input[source + 16], 16);
+            }
+        }
+    }
+}
+
 template <bool TO_LINEAR>
 void Swizzle(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,
              u32 height, u32 depth, u32 block_height, u32 block_depth, u32 stride_alignment, bool native_tiling) {
@@ -193,6 +230,25 @@ void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes
     bytes_per_pixel = 1U << new_bpp;
     Swizzle<false>(output, input, bytes_per_pixel, width, height, depth, block_height, block_depth,
                    stride, native_tiling);
+}
+
+void UnswizzleTextureNativeFast(std::span<u8> output, std::span<const u8> input,
+                                u32 bytes_per_pixel, u32 width, u32 height, u32 depth,
+                                u32 block_height, u32 block_depth, u32 stride_alignment,
+                                bool native_tiling) {
+    const u32 stride = Common::AlignUpLog2(width, stride_alignment) * bytes_per_pixel;
+    const u32 new_bpp = (std::min)(4U, static_cast<u32>(std::countr_zero(width * bytes_per_pixel)));
+    const u32 new_width = (width * bytes_per_pixel) >> new_bpp;
+    const bool separate =
+        !input.empty() && !output.empty() &&
+        (std::less_equal<const void*>{}(input.data() + input.size(), output.data()) ||
+         std::less_equal<const void*>{}(output.data() + output.size(), input.data()));
+    if (native_tiling && new_bpp == 4 && (height & 1) == 0 && separate) {
+        return UnswizzleNativePairs(output, input, new_width, height, depth, block_height,
+                                    block_depth, stride);
+    }
+    return UnswizzleTexture(output, input, bytes_per_pixel, width, height, depth, block_height,
+                            block_depth, stride_alignment, native_tiling);
 }
 
 void SwizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,

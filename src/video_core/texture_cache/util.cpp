@@ -919,8 +919,14 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(Tegra::Memory
         for (s32 layer = 0; layer < info.resources.layers; ++layer) {
             const std::span<u8> dst = output.subspan(host_offset);
             const std::span<const u8> src = input.subspan(guest_offset + guest_layer_offset);
-            UnswizzleTexture(dst, src, 1U << bpp_log2, num_tiles.width, num_tiles.height,
-                             num_tiles.depth, block.height, block.depth, stride_alignment, gpu_memory.UsesNativeTiling());
+            if (gpu_memory.UsesNativeTiling()) {
+                Tegra::Texture::UnswizzleTextureNativeFast(
+                    dst, src, 1U << bpp_log2, num_tiles.width, num_tiles.height, num_tiles.depth,
+                    block.height, block.depth, stride_alignment, true);
+            } else {
+                UnswizzleTexture(dst, src, 1U << bpp_log2, num_tiles.width, num_tiles.height,
+                                 num_tiles.depth, block.height, block.depth, stride_alignment, false);
+            }
             guest_layer_offset += layer_stride;
             host_offset += host_bytes_per_layer;
         }
