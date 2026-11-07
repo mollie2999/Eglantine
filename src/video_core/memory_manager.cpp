@@ -252,10 +252,37 @@ std::optional<DAddr> MemoryManager::GpuToCpuAddress(GPUVAddr gpu_addr) const {
     if (!IsWithinGPUAddressRange(gpu_addr)) [[unlikely]] {
         return std::nullopt;
     }
+
+    // Descriptor and buffer reads often translate many addresses from the same guest page.
+    // Keep the page base per thread and invalidate it whenever this address space is remapped.
+    struct TranslationCacheEntry {
+        size_t owner{};
+        GPUVAddr gpu_page{};
+        u64 serial{};
+        DAddr device_page{};
+        bool mapped{};
+    };
+    constexpr size_t TranslationCacheSize = 1024;
+    thread_local std::array<TranslationCacheEntry, TranslationCacheSize> translation_cache{};
+    const GPUVAddr gpu_page = gpu_addr & ~page_mask;
+    const u64 serial = map_serial.load(std::memory_order_acquire);
+    const size_t owner = unique_identifier + 1;
+    const size_t cache_index =
+        static_cast<size_t>(((gpu_page >> page_bits) * 0x9E3779B97F4A7C15ULL) >> (64 - 10));
+    TranslationCacheEntry& cached = translation_cache[cache_index];
+    if (cached.owner == owner && cached.gpu_page == gpu_page && cached.serial == serial) {
+        if (!cached.mapped) {
+            return std::nullopt;
+        }
+        return cached.device_page + (gpu_addr & page_mask);
+    }
+
     DAddr dev_addr;
     if (GetEntry(gpu_addr, true) != EntryType::Mapped) [[unlikely]] {
-        if (GetEntry(gpu_addr, false) != EntryType::Mapped)
+        if (GetEntry(gpu_addr, false) != EntryType::Mapped) {
+            cached = {owner, gpu_page, serial, 0, false};
             return std::nullopt;
+        }
         dev_addr = (DAddr(page_table[PageEntryIndex(gpu_addr, false)]) << cpu_page_bits) +
                    (gpu_addr & page_mask);
     } else {
@@ -267,6 +294,7 @@ std::optional<DAddr> MemoryManager::GpuToCpuAddress(GPUVAddr gpu_addr) const {
                   dev_addr);
         return std::nullopt;
     }
+    cached = {owner, gpu_page, serial, dev_addr - (gpu_addr & page_mask), true};
     return dev_addr;
 }
 
