@@ -175,7 +175,7 @@ void UnswizzleNativePairs(std::span<u8> output, std::span<const u8> input, u32 w
         const u32 z = slice;
         const u32 offset_z = (z >> block_depth) * slice_size +
                              ((z & block_depth_mask) << (GOB_SIZE_SHIFT + block_height));
-        for (u32 line = 0; line < height; line += 2) {
+        for (u32 line = 0; line + 1 < height; line += 2) {
             const u32 swizzled_y = NativeGobOffset(pdep<SWIZZLE_Y_BITS>(line), true);
             const u32 block_y = line >> GOB_SIZE_Y_SHIFT;
             const u32 offset_y = (block_y >> block_height) * block_size +
@@ -190,6 +190,21 @@ void UnswizzleNativePairs(std::span<u8> output, std::span<const u8> input, u32 w
                 // The adjacent row's 16-byte segment follows this one within the GOB.
                 std::memcpy(&output[dest], &input[source], 16);
                 std::memcpy(&output[dest + pitch], &input[source + 16], 16);
+            }
+        }
+        if ((height & 1U) != 0) {
+            const u32 line = height - 1;
+            const u32 swizzled_y = NativeGobOffset(pdep<SWIZZLE_Y_BITS>(line), true);
+            const u32 block_y = line >> GOB_SIZE_Y_SHIFT;
+            const u32 offset_y = (block_y >> block_height) * block_size +
+                                 ((block_y & block_height_mask) << GOB_SIZE_SHIFT);
+            for (u32 column = 0; column < width; ++column) {
+                const u32 x = column * BYTES_PER_PIXEL;
+                const u32 offset_x = (x >> GOB_SIZE_X_SHIFT) << x_shift;
+                const u32 swizzled_x = ((column & 1U) << 6) | ((column & 2U) << 7);
+                const u32 source = offset_z + offset_y + offset_x + (swizzled_x | swizzled_y);
+                const u32 dest = slice * pitch * height + line * pitch + x;
+                std::memcpy(&output[dest], &input[source], 16);
             }
         }
     }
@@ -242,7 +257,7 @@ void UnswizzleTextureNativeFast(std::span<u8> output, std::span<const u8> input,
         !input.empty() && !output.empty() &&
         (std::less_equal<const void*>{}(input.data() + input.size(), output.data()) ||
          std::less_equal<const void*>{}(output.data() + output.size(), input.data()));
-    if (native_tiling && new_bpp == 4 && (height & 1) == 0 && separate) {
+    if (native_tiling && new_bpp == 4 && height >= 2 && separate) {
         return UnswizzleNativePairs(output, input, new_width, height, depth, block_height,
                                     block_depth, stride);
     }
