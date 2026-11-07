@@ -22,10 +22,8 @@ Build 19 is a performance build on top of build 18. It does not change rendering
 
 ## Known issues
 
-Nothing in build 19 targets these, and they are expected to behave as in build 18:
+Nothing in build 19 targets this, and it is expected to behave as in build 18:
 
-- Ocarina of Time can still look pixelated or have poor edge quality, including at 1x docked resolution.
 - Texture flickering can still occur in Ocarina of Time, especially on foliage and the ground.
-- Ocarina of Time fog and lighting can remain excessive in some scenes.
 
 Thanks to Duck912, zortos293 and the Lichii contributors for the ported optimizations, and to Jojo for the Ocarina of Time work this build continues from.
