@@ -53,6 +53,31 @@ bool MayWriteCommandList(Engines::EngineInterface& engine, Engines::EngineTypes 
     }
 }
 
+/// Whether a method sent to an engine other than Maxwell3D may write guest memory. Methods outside
+/// an engine's execution mask (native compute: its plain methods) only store their value, in the
+/// split's back too (ConsumeSink), so they cannot write memory the front's MME DMA reads.
+bool MayWriteGuestMemory(const Engines::EngineInterface& engine, Engines::EngineTypes type,
+                         u32 method) {
+    if (type == Engines::EngineTypes::KeplerCompute) {
+        return static_cast<const Engines::KeplerCompute&>(engine).MethodMayWriteMemory(method);
+    }
+    return method >= engine.execution_mask.size() || engine.execution_mask[method];
+}
+
+/// Variant for a multi-method call: any of the methods it writes.
+bool MayWriteGuestMemory(const Engines::EngineInterface& engine, Engines::EngineTypes type,
+                         u32 method, u32 amount, bool non_incrementing) {
+    if (non_incrementing || amount <= 1) {
+        return MayWriteGuestMemory(engine, type, method);
+    }
+    for (u32 i = 0; i < amount; ++i) {
+        if (MayWriteGuestMemory(engine, type, method + i)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // Anonymous namespace
 
 DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Control::ChannelState& channel_state_)
@@ -467,10 +492,12 @@ void DmaPusher::CallMethod(u32 argument) {
         // copy, native QMD signal, or completed native macro methods that can launch those writes.
         const bool writer = MayWriteCommandList(*subchannel, engine_type, dma_state.method,
                                                 dma_state.is_last_call);
+        const bool may_write = engine_type != Engines::EngineTypes::Maxwell3D &&
+                               MayWriteGuestMemory(*subchannel, engine_type, dma_state.method);
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
-            } else if (engine_type != Engines::EngineTypes::Maxwell3D) {
+            } else if (may_write) {
                 split.NoteUnknownWrite();
             }
         };
@@ -528,10 +555,14 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         const bool completes_method = dma_state.method_count <= num_methods;
         const bool writer = MayWriteCommandList(*subchannel, engine_type, dma_state.method,
                                                 completes_method);
+        const bool may_write =
+            engine_type != Engines::EngineTypes::Maxwell3D &&
+            MayWriteGuestMemory(*subchannel, engine_type, dma_state.method, num_methods,
+                                dma_state.non_incrementing);
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
-            } else if (engine_type != Engines::EngineTypes::Maxwell3D) {
+            } else if (may_write) {
                 split.NoteUnknownWrite();
             }
         };
