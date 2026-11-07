@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "common/cityhash.h"
 #include "video_core/buffer_cache/uniform_cache_history.h"
 
 #include <algorithm>
@@ -1200,9 +1201,37 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                device_memory.template GetPointer<u8>(device_addr + mapped_size) != nullptr) {
             mapped_size += Core::DEVICE_PAGESIZE - ((device_addr + mapped_size) & Core::DEVICE_PAGEMASK);
         }
-        if (mapped_size != 0) {
-            memory_tracker.MarkRegionAsCpuModified(device_addr, (std::min<u64>)(mapped_size, size));
+        const u64 marked = (std::min<u64>)(mapped_size, size);
+        // EDEN_NX2_BANK_HASH=0: upload the whole bank again, as before. Otherwise only the pages
+        // whose guest bytes differ from what the host buffer was last given.
+        static const bool hash_pages = [] {
+            const char* v = std::getenv("EDEN_NX2_BANK_HASH");
+            return v == nullptr || v[0] != '0';
+        }();
+        if (marked != 0 && !hash_pages) {
+            memory_tracker.MarkRegionAsCpuModified(device_addr, marked);
+        } else if (marked != 0) {
+            for (DAddr page = device_addr & ~DAddr{Core::DEVICE_PAGEMASK}; page < device_addr + marked;
+                 page += Core::DEVICE_PAGESIZE) {
+                const DAddr start = (std::max)(page, device_addr);
+                const DAddr end = (std::min<DAddr>)(page + Core::DEVICE_PAGESIZE, device_addr + marked);
+                const u8* const bytes = device_memory.template GetPointer<u8>(start);
+                if (bytes == nullptr) {
+                    break;
+                }
+                const u64 hash = Common::CityHash64(reinterpret_cast<const char*>(bytes), end - start);
+                const auto it = native_bank_page_hashes.find(page);
+                if (it == native_bank_page_hashes.end() || it->second != hash) {
+                    memory_tracker.MarkRegionAsCpuModified(start, end - start);
+                }
+                pending_bank_hashes.emplace_back(page, hash);
+            }
         }
+    }
+    if (!pending_bank_hashes.empty() && (needs_alignment_stream ||
+        (has_host_buffer && size <= channel_state->uniform_buffer_skip_cache_size &&
+         !memory_tracker.IsRegionGpuModified(device_addr, size)))) {
+        pending_bank_hashes.clear(); // streamed from guest memory: no host copy to describe
     }
     const bool use_fast_buffer = needs_alignment_stream
         || (has_host_buffer && size <= channel_state->uniform_buffer_skip_cache_size
@@ -1248,6 +1277,11 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     if (SynchronizeBuffer(buffer, device_addr, size)) {
         ++channel_state->uniform_cache_hits[0];
     }
+    // The host buffer now holds the guest bytes the bank pages were hashed from.
+    for (const auto& [page, hash] : pending_bank_hashes) {
+        native_bank_page_hashes[page] = hash;
+    }
+    pending_bank_hashes.clear();
     // Skip binding if it's not needed and if the bound buffer is not the fast version
     // This exists to avoid instances where the fast buffer is bound and a GPU write happens
     needs_bind |= HasFastUniformBufferBound(stage, binding_index);
@@ -2323,6 +2357,11 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
 template <class P>
 void BufferCache<P>::UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                                   std::span<BufferCopy> copies) {
+    if (!native_bank_page_hashes.empty()) {
+        for (const BufferCopy& copy : copies) {
+            ForgetNativeBankHashes(buffer.CpuAddr() + copy.dst_offset, copy.size);
+        }
+    }
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
         MappedUploadMemory(buffer, total_size_bytes, copies);
     } else {
@@ -2399,8 +2438,26 @@ bool BufferCache<P>::InlineMemory(DAddr dest_address, size_t copy_size,
 }
 
 template <class P>
+void BufferCache<P>::ForgetNativeBankHashes(DAddr address, u64 size) {
+    if (native_bank_page_hashes.empty() || size == 0) {
+        return;
+    }
+    const DAddr first = address & ~DAddr{Core::DEVICE_PAGEMASK};
+    const DAddr end = address + size;
+    if ((end - first) / Core::DEVICE_PAGESIZE > native_bank_page_hashes.size()) {
+        std::erase_if(native_bank_page_hashes,
+                      [&](const auto& entry) { return entry.first >= first && entry.first < end; });
+        return;
+    }
+    for (DAddr page = first; page < end; page += Core::DEVICE_PAGESIZE) {
+        native_bank_page_hashes.erase(page);
+    }
+}
+
+template <class P>
 void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_size,
                                                 std::span<const u8> inlined_buffer) {
+    ForgetNativeBankHashes(dest_address, copy_size);
     ClearDownload(dest_address, copy_size);
     gpu_modified_ranges.Subtract(dest_address, copy_size);
     MarkVertexBuffersStale(dest_address, copy_size);

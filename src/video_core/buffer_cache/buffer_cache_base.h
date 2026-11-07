@@ -679,6 +679,13 @@ private:
     std::vector<std::pair<DAddr, u64>> uploaded_buffer_ranges;
     /// Native 64 KiB uniform banks re-uploaded this frame (EDEN_NX2_BANK_REUPLOAD).
     std::unordered_set<DAddr> native_indirect_uniforms_this_frame;
+    /// Per 4 KiB page of those banks, the hash of what the host buffer holds there (the guest bytes
+    /// as of its last upload). Pages whose guest bytes still hash the same need no re-upload.
+    std::unordered_map<DAddr, u64> native_bank_page_hashes;
+    /// Bank pages hashed for the bind in progress, recorded once it synchronized the host buffer.
+    std::vector<std::pair<DAddr, u64>> pending_bank_hashes;
+    /// Forgets the hashes of the bank pages in [address, address + size): the host buffer changed.
+    void ForgetNativeBankHashes(DAddr address, u64 size);
 
     struct LRUItemParams {
         using ObjectType = BufferId;
