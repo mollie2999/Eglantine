@@ -11,6 +11,7 @@
 #include "tests/core/system_test_context.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/renderer_null/null_rasterizer.h"
 
 TEST_CASE("GPU command ranges cannot walk past the address space", "[gpu_command_safety]") {
     ScopedSystemTestContext context;
@@ -43,6 +44,44 @@ TEST_CASE("GPU command ranges cannot walk past the address space", "[gpu_command
         memory.ReadBlockUnsafe(address, bytes.data(), bytes.size());
         REQUIRE(std::ranges::all_of(bytes, [](u8 value) { return value == 0; }));
     }
+}
+
+TEST_CASE("GPU address translations follow page remaps and unmaps", "[gpu_command_safety]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31};
+    Null::RasterizerNull rasterizer{system.GPU()};
+    memory.BindRasterizer(&rasterizer);
+
+    constexpr GPUVAddr gpu_page = 0x10000;
+    constexpr GPUVAddr gpu_offset = 0x120;
+    constexpr DAddr first_device_page = 0x2000;
+    constexpr DAddr second_device_page = 0x9000;
+    constexpr size_t page_size = 1ULL << 12;
+    constexpr GPUVAddr big_gpu_page = 0x20000;
+    constexpr DAddr big_device_page = 0x100000;
+    constexpr size_t big_page_size = 1ULL << 16;
+
+    memory.Map(gpu_page, first_device_page, page_size, Tegra::PTEKind::INVALID, false);
+    REQUIRE(memory.GpuToCpuAddress(gpu_page + gpu_offset) == first_device_page + gpu_offset);
+
+    Tegra::MemoryManager other_memory{system, device_memory, 32, 1ULL << 31};
+    other_memory.BindRasterizer(&rasterizer);
+    other_memory.Map(gpu_page, second_device_page, page_size, Tegra::PTEKind::INVALID, false);
+    REQUIRE(other_memory.GpuToCpuAddress(gpu_page + gpu_offset) == second_device_page + gpu_offset);
+    REQUIRE(memory.GpuToCpuAddress(gpu_page + gpu_offset) == first_device_page + gpu_offset);
+
+    memory.Map(gpu_page, second_device_page, page_size, Tegra::PTEKind::INVALID, false);
+    REQUIRE(memory.GpuToCpuAddress(gpu_page + gpu_offset) == second_device_page + gpu_offset);
+
+    memory.Unmap(gpu_page, page_size);
+    REQUIRE_FALSE(memory.GpuToCpuAddress(gpu_page + gpu_offset));
+    REQUIRE(other_memory.GpuToCpuAddress(gpu_page + gpu_offset) == second_device_page + gpu_offset);
+
+    memory.Map(big_gpu_page, big_device_page, big_page_size, Tegra::PTEKind::INVALID, true);
+    REQUIRE(memory.GpuToCpuAddress(big_gpu_page + gpu_offset) == big_device_page + gpu_offset);
 }
 
 TEST_CASE("Invalid GPU syncpoint increments leave valid counters and actions intact",
