@@ -616,9 +616,7 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
     };
     thread_local std::vector<Entry> cache(4096);
     const u64 serial = map_serial.load(std::memory_order_acquire);
-    // Buffer sizes often shrink as addresses advance to the same end; XOR makes those keys collide.
-    const u64 hash = (gpu_addr + size * 0x9E3779B97F4A7C15ULL) * 0xBF58476D1CE4E5B9ULL;
-    Entry& entry = cache[hash >> 52];
+    Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 52];
     if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr && entry.size == size &&
         entry.serial == serial) {
         return entry.result;

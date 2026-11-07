@@ -4,7 +4,7 @@ Build 19 is a performance build on top of build 18. It does not change rendering
 
 ### Performance
 
-- **Ocarina of Time, GPU back thread:** `MaxContinuousRange` answers are now cached per thread with 4096 entries instead of 64. Ocarina of Time binds storage buffers behind loaded pointers on most draws and dispatches, which is far more buffers than the old cache held, so about 25,000 lookups a second at the Kokiri Forest spawn walked the page table (44% of the back thread in stack samples). Misses fall to roughly 7,000 a second over shorter ranges. Measured by the author on an MSVC build with the CLI harness, Kokiri Forest spawn, GPU accuracy Fast: 26.3–27.4 ms per frame before, 22.3–23.2 ms after, about +20% fps. Other scenes and games were not measured. The cache hash was also reworked (`9faf60b6d5`) so that entries whose address and size move together no longer land in the same slot.
+- **Ocarina of Time, GPU back thread:** `MaxContinuousRange` answers are now cached per thread with 4096 entries instead of 64. Ocarina of Time binds storage buffers behind loaded pointers on most draws and dispatches, which is far more buffers than the old cache held, so about 25,000 lookups a second at the Kokiri Forest spawn walked the page table (44% of the back thread in stack samples). Misses fall to roughly 7,000 a second over shorter ranges. Measured by the author on an MSVC build with the CLI harness, Kokiri Forest spawn, GPU accuracy Fast: 26.3–27.4 ms per frame before, 22.3–23.2 ms after, about +20% fps. Other scenes and games were not measured.
 - **Split GPU thread:** The 3D front thread no longer waits on queued compute, copy or 2D work just because a plain register was written to one of those engines. Only methods that can write guest memory (uploads, launches, QMD signals, report semaphores, macros) now move the "unknown write" marker, so an MME DMA read on the front thread stops stalling behind unrelated back-thread work.
 - **Buffer cache:** Binding clean index, vertex and stage buffers skips word-level work when nothing was modified and clearing cannot change CPU tracking (ported from Lichii). Idle buffer usage trackers are no longer reset on every track (ported from sylvieistaken/selevet-eglantine, via Lichii). Page and recent-range clears after each track are unchanged.
 - **Draw setup:** `GetMemoryLayoutSize` keeps the last memory layout interval and answers repeated queries inside it without a new `std::map` search. Every map or unmap invalidates it, including splits, merges and extensions of adjacent intervals (ported from Lichii).
@@ -18,6 +18,7 @@ Build 19 is a performance build on top of build 18. It does not change rendering
 ### Not included
 
 - "Wait for the OoT frame fence to prevent flashing" was tried for this build and reverted before release, so it is not part of build 19. Ocarina of Time frame pacing is unchanged from build 18.
+- A reworked `MaxContinuousRange` cache hash (`9faf60b6d5`) was reverted before release: in game it brought the page walks back (about 22% of the GPU back thread) and dropped Ocarina of Time from 45–46 to 35–36 FPS at the Kakariko test spot. Build 19 keeps the original hash.
 
 ## Known issues
 
