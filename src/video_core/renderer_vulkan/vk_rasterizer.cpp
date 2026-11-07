@@ -471,7 +471,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
 
     {
         Profile::Scope scope{Profile::Zone::DynamicState};
-        UpdateDynamicStates(pipeline);
+        UpdateDynamicStates();
     }
 
     query_cache.NotifySegment(true);
@@ -2149,7 +2149,7 @@ bool AccelerateDMA::BufferToImage(const Tegra::DMA::ImageCopy& copy_info,
     return DmaBufferImageCopy<true>(copy_info, buffer_operand, image_operand);
 }
 
-void RasterizerVulkan::UpdateDynamicStates(GraphicsPipeline* draw_pipeline) {
+void RasterizerVulkan::UpdateDynamicStates() {
     auto& regs = maxwell3d->regs;
     auto& flags = maxwell3d->dirty.flags;
     const auto topology = maxwell3d->draw_manager.draw_state.topology;
@@ -2227,9 +2227,7 @@ void RasterizerVulkan::UpdateDynamicStates(GraphicsPipeline* draw_pipeline) {
     }
 
     if (device.IsExtVertexInputDynamicStateSupported()) {
-        GraphicsPipeline* const gp =
-            draw_pipeline != nullptr ? draw_pipeline : pipeline_cache.CurrentGraphicsPipeline();
-        if (gp && gp->HasDynamicVertexInput()) {
+        if (auto* gp = pipeline_cache.CurrentGraphicsPipeline(); gp && gp->HasDynamicVertexInput()) {
             UpdateVertexInput(regs);
         }
     }

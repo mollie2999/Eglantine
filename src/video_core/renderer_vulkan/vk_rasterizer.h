@@ -193,7 +193,7 @@ private:
     /// the GPU makes them now (BufferCache::Nx2CopyListPages).
     void SubmitNx2ListCopies();
 
-    void UpdateDynamicStates(GraphicsPipeline* draw_pipeline = nullptr);
+    void UpdateDynamicStates();
 
     void HandleTransformFeedback();
 
