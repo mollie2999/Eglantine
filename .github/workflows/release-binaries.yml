@@ -1,37 +1,22 @@
 name: release-binaries
-run-name: "Release binaries · ${{ github.ref_name }}"
+run-name: "Release ${{ inputs.tag }} · ${{ github.ref_name }}"
 
 on:
   workflow_dispatch:
     inputs:
+      tag:
+        description: Release tag to create (notes come from docs/releases/<tag>.md)
+        type: string
+        required: true
+        default: build-19
       publish_release:
-        description: Publish the binaries as a GitHub release
+        description: Publish the binaries as a GitHub release once every platform built
         type: boolean
         default: true
-      patch_notes:
-        description: Short notes to include in the generated GitHub release
-        type: string
-        required: false
-        default: ''
-  push:
-    branches:
-      - nx2
-      - nx2-experimental
-      - exp
-    # A binary only changes when build inputs change; docs-only pushes skip the build.
-    paths:
-      - "src/**"
-      # Test-only changes cannot change a binary: the build configures with BUILD_TESTING=OFF and
-      # YUZU_TESTS=OFF below, so a push that only touches src/tests has nothing to rebuild.
-      - "!src/tests/**"
-      - "CMakeLists.txt"
-      - "CMakeModules/**"
-      - "externals/**"
-      - "dist/**"
-      - "tools/**"
-      - ".patch/**"
-      - "cpmfile.json"
-      - ".github/workflows/release-binaries.yml"
+      prerelease:
+        description: Mark the release as a pre-release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,7 +30,7 @@ env:
 # A running build is never cancelled: it finishes and publishes. A push meanwhile queues one build;
 # a later push replaces it, so the newest commit builds as soon as the running one is done.
 concurrency:
-  group: release-binaries-${{ github.ref }}
+  group: release-oot-noregress-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -565,13 +550,13 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-  # Publishes every binary as a GitHub pre-release once every platform built: on pushes to nx2
-  # and nx2-experimental, and on manual runs unless "Publish the binaries as a GitHub release" is
-  # unticked.
+
+  # Publishes every binary as a GitHub release once every platform built. Packaging goes into
+  # release-files/ because the repository already tracks a dist/ directory.
   release:
     name: Publish release
     needs: build
-    if: github.event_name == 'push' || inputs.publish_release
+    if: inputs.publish_release
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -591,94 +576,61 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir dist
-          # Asset names drop the commit sha: the release tag already identifies the build, and
-          # stable names let the notes table link to them.
+          mkdir release-files
           strip_sha() { sed "s/-${GITHUB_SHA}//" <<< "$1"; }
           for artifact in artifacts/*/; do
             name=$(basename "$artifact")
             if compgen -G "$artifact*.AppImage" > /dev/null; then
-              # Linux: ship the AppImage and the tar.gz as they are.
               for file in "$artifact"*.AppImage "$artifact"*.tar.gz; do
-                cp "$file" "dist/$(strip_sha "$(basename "$file")")"
+                cp "$file" "release-files/$(strip_sha "$(basename "$file")")"
               done
             elif compgen -G "$artifact*.zip" > /dev/null; then
               for file in "$artifact"*.zip "$artifact"*.dmg; do
-                [[ -e "$file" ]] && cp "$file" "dist/$(strip_sha "$(basename "$file")")"
+                [[ -e "$file" ]] && cp "$file" "release-files/$(strip_sha "$(basename "$file")")"
               done
             else
-              (cd "$artifact" && zip -qr "${GITHUB_WORKSPACE}/dist/$(strip_sha "$name").zip" .)
+              (cd "$artifact" && zip -qr "${GITHUB_WORKSPACE}/release-files/$(strip_sha "$name").zip" .)
             fi
           done
-          ls -la dist
+          (cd release-files && sha256sum * > SHA256SUMS.txt)
+          ls -la release-files
 
       - name: Create release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PATCH_NOTES: ${{ inputs.patch_notes }}
+          TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
-          tag=$(git tag --points-at "$GITHUB_SHA" --list 'build-*' --sort=-version:refname | head -n1)
-          if [ -z "$tag" ]; then
-            tag="build-${GITHUB_RUN_NUMBER}"
-          fi
-          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          notes_file="docs/releases/${TAG}.md"
+          [ -f "$notes_file" ] || { echo "::error::$notes_file is missing"; exit 1; }
 
-          cat > notes.md <<EOF
-          Automatic build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA}.
+          {
+            cat "$notes_file"
+            cat <<EOF
 
-          ## Linux
+          ## Downloads
 
-          Linux packages come as an AppImage (self-contained, needs glibc 2.39 or newer: Ubuntu 24.04, Fedora 40, Debian 13, Arch) and a tar.gz (uses your system libraries, so Qt 6 and the usual libraries must be installed).
+          Built from \`${GITHUB_REF_NAME}\` at commit \`${GITHUB_SHA}\` ([Actions run](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})). Checksums are in \`SHA256SUMS.txt\`.
 
-          | Build Type | Standard | PGO (Recommended) | Notes |
-          | --- | --- | --- | --- |
-          | amd64 | [AppImage](${base}/eglantine-linux-x86_64.AppImage) · [tar.gz](${base}/eglantine-linux-x86_64.tar.gz) | [AppImage](${base}/eglantine-linux-x86_64-pgo.AppImage) · [tar.gz](${base}/eglantine-linux-x86_64-pgo.tar.gz) | Make the AppImage executable (\`chmod +x\`) and run it |
-          | ARM (aarch64) | [AppImage](${base}/eglantine-linux-aarch64.AppImage) · [tar.gz](${base}/eglantine-linux-aarch64.tar.gz) | [AppImage](${base}/eglantine-linux-aarch64-pgo.AppImage) · [tar.gz](${base}/eglantine-linux-aarch64-pgo.tar.gz) | |
+          | Platform | Standard | PGO (recommended) |
+          | --- | --- | --- |
+          | Linux x86-64 | [AppImage](${base}/eglantine-linux-x86_64.AppImage) · [tar.gz](${base}/eglantine-linux-x86_64.tar.gz) | [AppImage](${base}/eglantine-linux-x86_64-pgo.AppImage) · [tar.gz](${base}/eglantine-linux-x86_64-pgo.tar.gz) |
+          | Linux ARM64 | [AppImage](${base}/eglantine-linux-aarch64.AppImage) · [tar.gz](${base}/eglantine-linux-aarch64.tar.gz) | [AppImage](${base}/eglantine-linux-aarch64-pgo.AppImage) · [tar.gz](${base}/eglantine-linux-aarch64-pgo.tar.gz) |
+          | Windows x86-64 | [MSVC zip](${base}/eglantine-windows-x86_64.zip) | [MinGW PGO zip](${base}/eglantine-windows-x86_64-pgo.zip) |
+          | macOS ARM64 | [zip](${base}/eglantine-macos-arm64.zip) · [dmg](${base}/eglantine-macos-arm64.dmg) | |
 
-          ## Windows
-
-          Windows packages are in-place zip files: extract and run \`eglantine.exe\`, or \`eden-cli.exe\` from a terminal.
-
-          | Build Type | Standard | PGO (Recommended) | Notes |
-          | --- | --- | --- | --- |
-          | amd64 / x86_64 (MSVC) | [MSVC zip](${base}/eglantine-windows-x86_64.zip) | | Use if you run into graphical issues on other builds |
-          | amd64 / x86_64 (MinGW) | | [PGO zip](${base}/eglantine-windows-x86_64-pgo.zip) | Built with MinGW clang; bundles its own DLLs, no Visual C++ redistributable needed |
-
-          ## macOS
-
-          | Build Type | Standard | PGO (Recommended) | Notes |
-          | --- | --- | --- | --- |
-          | arm64 (Apple Silicon) | [zip](${base}/eglantine-macos-arm64.zip) | | macOS 15 or newer. Not notarized: right-click and choose Open the first time, or run \`xattr -dr com.apple.quarantine eglantine.app\`. \`eden-cli\` is inside the app, in \`Contents/MacOS\` |
-
-          The PGO builds are the same programs compiled with profile-guided optimization (clang plus Eden's profile); prefer them when your CPU supports it.
+          Linux AppImages need glibc 2.39 or newer; run \`chmod +x\` first. The macOS app is not notarized: right-click and choose Open, or run \`xattr -dr com.apple.quarantine eglantine.app\`.
           EOF
+          } > notes.md
 
-          if [ -n "$PATCH_NOTES" ]; then
-            printf '\n## Patch notes\n\n%s\n' "$PATCH_NOTES" >> notes.md
-          fi
-
-          changelog="docs/releases/${tag}.md"
-          if [ -f "$changelog" ]; then
-            cat "$changelog" >> notes.md
-          fi
-
-          gh release create "${tag}" dist/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --target "${GITHUB_SHA}" \
-            --prerelease \
-            --title "Eglantine ${GITHUB_REF_NAME} ${tag} (${GITHUB_SHA::7})" \
-            --notes-file notes.md
-
-      - name: Ping Discord
-        shell: bash
-        env:
-          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/build-${GITHUB_RUN_NUMBER}"
-          MSG=$(printf '## <@&1566184315178713190> Eglantine %s build %s (%s)\n%s' \
-            "$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER" "${GITHUB_SHA::7}" "$URL")
-          jq -n --arg content "$MSG" \
-            '{content: $content, allowed_mentions: {roles: ["1566184315178713190"]}}' \
-          | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"
+          flags=()
+          [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
+          gh release create "$TAG" release-files/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Eglantine ${TAG/build-/build }" \
+            --notes-file notes.md \
+            "${flags[@]}"
