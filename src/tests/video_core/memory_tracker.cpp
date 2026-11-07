@@ -567,6 +567,27 @@ TEST_CASE("MemoryTracker: Cached write downloads") {
     REQUIRE(rasterizer.Count() == 0);
 }
 
+TEST_CASE("MemoryTracker: upload scan handles cached and dirty pages across words", "[video_core]") {
+    RasterizerInterface rasterizer;
+    std::optional<MemoryTracker> memory_track(rasterizer);
+    memory_track->UnmarkRegionAsCpuModified(c, WORD * 2);
+    memory_track->CachedCpuWrite(c + WORD - PAGE, PAGE);
+    memory_track->MarkRegionAsCpuModified(c + WORD + PAGE, PAGE);
+    REQUIRE(rasterizer.Count() == 126);
+
+    std::vector<Range> uploads;
+    memory_track->ForEachUploadRange(c, WORD * 2, [&](u64 address, u64 size) {
+        uploads.emplace_back(address, size);
+    });
+    REQUIRE(uploads == std::vector<Range>{{c + WORD + PAGE, PAGE}});
+    REQUIRE(rasterizer.Count() == 128);
+    REQUIRE_FALSE(memory_track->IsRegionCpuModified(c + WORD - PAGE, PAGE));
+
+    memory_track->FlushCachedWrites();
+    REQUIRE(memory_track->IsRegionCpuModified(c + WORD - PAGE, PAGE));
+    REQUIRE(rasterizer.Count() == 127);
+}
+
 TEST_CASE("MemoryTracker: FlushCachedWrites batching") {
     RasterizerInterface rasterizer;
     std::optional<MemoryTracker> memory_track(rasterizer);
