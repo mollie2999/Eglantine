@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <array>
-#include <vector>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -605,8 +604,7 @@ bool MemoryManager::IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
 size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
     // Native storage buffers ask this for up to 8 MiB on each bind, ~70,000 times a second in
     // title 1's forest (17% of the GPU thread walking pages): keep answers per thread until the
-    // page table changes. Ocarina of Time asks ~220,000 times a second for more buffers than 64
-    // entries hold: a ninth missed and walked ~7 MiB each, 44% of the GPU thread.
+    // page table changes.
     struct Entry {
         size_t owner;
         GPUVAddr gpu_addr;
@@ -614,9 +612,9 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
         u64 serial;
         size_t result;
     };
-    thread_local std::vector<Entry> cache(4096);
+    thread_local std::array<Entry, 64> cache{};
     const u64 serial = map_serial.load(std::memory_order_acquire);
-    Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 52];
+    Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 58];
     if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr && entry.size == size &&
         entry.serial == serial) {
         return entry.result;
