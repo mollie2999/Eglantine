@@ -3396,6 +3396,9 @@ private:
     void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
     void FinishFrontMacro(Core::System& system);
     std::unique_ptr<FrontState> front;
+    /// SkipSameValueWrites(), read once: CallMethod asks for every 3D method on the back, and the
+    /// function-local static's guard check cost ~0.9% of the back thread (Lichii #488).
+    const bool skip_same_value_writes = SkipSameValueWrites();
     bool front_macros{};
     // EDEN_NX2_SPLIT_VERIFY: the last SET_SHADOW_RAM_CONTROL writes each side saw (argument,
     // mode before, path), printed when the sides disagree.

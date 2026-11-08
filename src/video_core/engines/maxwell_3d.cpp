@@ -319,7 +319,7 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
     const auto control = shadow_state.shadow_ram_control;
     // Sunk methods are state writes only (not in execution_mask): skip unchanged values, as
     // CallMethod does.
-    const bool skip_same = SkipSameValueWrites();
+    const bool skip_same = skip_same_value_writes;
     const auto process = [&](u32 method, u32 value) {
         if (!skip_same || regs.reg_array[method] != value) {
             ProcessDirtyRegisters(method, value);
@@ -508,7 +508,7 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
     // binds, semaphores, ...) always run. EDEN_NX2_SKIP_SAME=0 turns it off.
     if (!execution_mask[method]) {
         // ProcessMethodCall (and the draw manager behind it) acts only on executable methods.
-        if (!SkipSameValueWrites() || regs.reg_array[method] != argument) {
+        if (!skip_same_value_writes || regs.reg_array[method] != argument) {
             ProcessDirtyRegisters(method, argument);
         }
         return;
