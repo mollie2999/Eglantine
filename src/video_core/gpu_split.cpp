@@ -116,6 +116,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     ring = std::make_unique<u64[]>(RingWords);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
+    ++starts;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
     // Raiders' squid form fails when its macros run on the split front thread. The same
     // scene works with the split active and macros on the back (mode 1), so keep that
