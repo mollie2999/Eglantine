@@ -1188,13 +1188,16 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         const char* v = std::getenv("EDEN_NX2_BANK_REUPLOAD");
         return v != nullptr ? v[0] : '1';
     }();
-    const bool native_bank = has_host_buffer && size != 0 && gpu_memory != nullptr &&
-                             gpu_memory->UsesNativeTiling() &&
-                             !memory_tracker.IsRegionGpuModified(device_addr, size);
-    if (bank_mode != '0' && native_bank &&
+    // Cheapest checks first: a bank is re-uploaded once per frame, and most binds come after that,
+    // so the GPU-modified walk over the whole bank (64 KiB) runs only for a bank's first bind.
+    const bool every_bind = bank_mode == '2' || bank_mode == '3';
+    const bool bank_candidate =
+        bank_mode != '0' && has_host_buffer && size != 0 && gpu_memory != nullptr &&
         (bank_mode == '3' || (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000) &&
-        (bank_mode == '2' || bank_mode == '3' ||
-         native_indirect_uniforms_this_frame.insert(device_addr).second)) {
+        (every_bind || !native_indirect_uniforms_this_frame.contains(device_addr)) &&
+        gpu_memory->UsesNativeTiling();
+    if (bank_candidate && !memory_tracker.IsRegionGpuModified(device_addr, size) &&
+        (every_bind || native_indirect_uniforms_this_frame.insert(device_addr).second)) {
         // The bank size is only an upper limit: stop at the end of the mapped memory.
         u64 mapped_size = 0;
         while (mapped_size < size &&
