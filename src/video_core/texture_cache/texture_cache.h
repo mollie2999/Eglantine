@@ -445,6 +445,17 @@ void TextureCache<P>::TickFrame() {
                      created_shapes[key].second);
         }
         created_shapes.clear();
+        std::vector<std::pair<u64, u64>> uploads;
+        for (const auto& [key, value] : uploaded_shapes) uploads.emplace_back(value.second, key);
+        std::sort(uploads.rbegin(), uploads.rend());
+        for (size_t i = 0; i < std::min<size_t>(10, uploads.size()); ++i) {
+            const u64 key = uploads[i].second;
+            LOG_DEBUG(HW_GPU, "  uploaded {}x, {} MiB: format {} type {} levels {} layers {} {}x{}",
+                     uploaded_shapes[key].first, uploads[i].first >> 20, key >> 56,
+                     (key >> 52) & 0xF, (key >> 48) & 0xF, (key >> 36) & 0xFFF,
+                     (key >> 18) & 0x3FFFF, key & 0x3FFFF);
+        }
+        uploaded_shapes.clear();
         // The per-image and per-shape tallies only feed debug lines: skip them while those are off.
         debug_stats = Common::Log::IsLevelEnabled(Common::Log::Class::HW_GPU, Common::Log::Level::Debug);
         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
@@ -1777,6 +1788,18 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     ++images_uploaded;
     uploaded_bytes += image.guest_size_bytes;
     largest_upload = (std::max<u64>)(largest_upload, image.guest_size_bytes);
+    if (debug_stats) {
+        const auto& shape_info = image.info;
+        const u64 key = (u64{static_cast<u32>(shape_info.format)} << 56) |
+                        (u64{static_cast<u32>(shape_info.type)} << 52) |
+                        (u64{static_cast<u32>(shape_info.resources.levels) & 0xF} << 48) |
+                        (u64{static_cast<u32>(shape_info.resources.layers) & 0xFFF} << 36) |
+                        (u64{shape_info.size.width & 0x3FFFF} << 18) |
+                        (shape_info.size.height & 0x3FFFF);
+        auto& shape = uploaded_shapes[key];
+        ++shape.first;
+        shape.second += image.guest_size_bytes;
+    }
     if (!UploadInChunks(image)) {
         auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
         UploadImageContents(image, staging);
