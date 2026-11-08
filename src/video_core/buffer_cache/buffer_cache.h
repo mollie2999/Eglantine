@@ -1231,15 +1231,11 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             }
         }
     }
-    if (!pending_bank_hashes.empty() && (needs_alignment_stream ||
-        (has_host_buffer && size <= channel_state->uniform_buffer_skip_cache_size &&
-         !memory_tracker.IsRegionGpuModified(device_addr, size)))) {
-        pending_bank_hashes.clear(); // streamed from guest memory: no host copy to describe
-    }
     const bool use_fast_buffer = needs_alignment_stream
         || (has_host_buffer && size <= channel_state->uniform_buffer_skip_cache_size
             && !memory_tracker.IsRegionGpuModified(device_addr, size));
     if (use_fast_buffer) {
+        pending_bank_hashes.clear(); // streamed from guest memory: no host copy to describe
         if constexpr (IS_OPENGL) {
             if (runtime.HasFastBufferSubData()) {
                 // Fast path for Nvidia
