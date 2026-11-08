@@ -67,11 +67,13 @@ void DrainBack() {
 // noted per page, compute and copy work is waited for whole. Ocarina of Time acquires ~4,600
 // times a second, and each full drain emptied the back's queue (~425 ms a second of the front).
 // A word that doesn't meet the acquire yet is read again after a full drain by the caller.
-// EDEN_NX2_ACQUIRE_EARLY=0 always drains first, as before.
+// Off by default: in Ocarina of Time it let acquires pass on a value a still-queued release was
+// about to change (a light shaft drawn as a white block, wall objects drawn black).
+// EDEN_NX2_ACQUIRE_EARLY=1 turns it on for testing.
 u32 ReadSemaphoreEarly(DmaPusher& dma_pusher, GPUVAddr address) {
     static const bool early = [] {
         const char* value = std::getenv("EDEN_NX2_ACQUIRE_EARLY");
-        return value == nullptr || value[0] != '0';
+        return value != nullptr && value[0] != '0';
     }();
     auto& split = VideoCommon::GpuSplit::Get();
     const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
