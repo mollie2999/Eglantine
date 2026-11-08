@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -898,15 +899,23 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     auto input_assembly_topology = MaxwellToVK::PrimitiveTopology(device, key.state.topology);
     if (input_assembly_topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {
         if (!has_tess_stages) {
-            LOG_WARNING(Render_Vulkan, "Patch topology used without tessellation, using points");
+            // Logged once: Switch 2 titles build thousands of such pipelines.
+            static std::atomic_bool logged_points{};
+            if (!logged_points.exchange(true, std::memory_order_relaxed)) {
+                LOG_WARNING(Render_Vulkan,
+                            "Patch topology used without tessellation, using points");
+            }
             input_assembly_topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
         }
     } else {
         if (has_tess_stages) {
             // The Vulkan spec requires patch list IA topology be used with tessellation
             // shader stages. Forcing it fixes a crash on some drivers
-            LOG_WARNING(Render_Vulkan,
-                        "Patch topology not used with tessellation, using patch list");
+            static std::atomic_bool logged_patches{};
+            if (!logged_patches.exchange(true, std::memory_order_relaxed)) {
+                LOG_WARNING(Render_Vulkan,
+                            "Patch topology not used with tessellation, using patch list");
+            }
             input_assembly_topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
         }
     }
