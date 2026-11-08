@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "common/spin_recursive_mutex.h"
 #include "common/common_types.h"
 #include "video_core/gpu_split.h"
 #include "common/logging.h"
@@ -222,6 +223,23 @@ inline void Report(const char* thread_name = "GPU thread") {
     if (!drains.empty()) {
         drains.pop_back();
         line += " | waits for the back by site:" + drains;
+    }
+    // Contended SpinRecursiveMutex waits on this thread (spinning, then asleep).
+    auto& lock_waits = Common::t_spin_lock_waits;
+    static constexpr std::array<const char*, 4> lock_names{"other", "buffer cache",
+                                                           "texture cache", "other"};
+    std::string locks;
+    for (size_t i = 0; i < lock_waits.count.size(); ++i) {
+        if (lock_waits.count[i] != 0) {
+            locks += fmt::format(" {} {:.1f} ms ({:.0f}/s),", lock_names[i],
+                                 static_cast<double>(lock_waits.ns[i]) * 1000.0 / window,
+                                 static_cast<double>(lock_waits.count[i]) * 1e9 / window);
+        }
+    }
+    lock_waits = {};
+    if (!locks.empty()) {
+        locks.pop_back();
+        line += " | contended lock waits:" + locks;
     }
     if (cpu_now && data.cpu_start_ns && *cpu_now >= *data.cpu_start_ns) {
         line += fmt::format(" | host_cpu_busy_ms_per_s={:.3f} window_wall_ms={:.3f}",

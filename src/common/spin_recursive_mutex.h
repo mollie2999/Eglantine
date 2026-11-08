@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <thread>
 
 #if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
@@ -13,12 +16,24 @@
 
 namespace Common {
 
+/// Time each thread waited for a contended SpinRecursiveMutex, per lock id (EDEN_NX2_GPU_PROFILE
+/// reports and resets it). Only measured with the profile on, and only on the contended path.
+struct SpinLockWaits {
+    std::array<std::uint64_t, 4> ns{};
+    std::array<std::uint64_t, 4> count{};
+};
+inline thread_local SpinLockWaits t_spin_lock_waits;
+inline const bool g_measure_spin_lock_waits = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+
 /// A recursive mutex that spins briefly before sleeping. The GPU caches' locks are taken tens of
 /// thousands of times a second by the GPU thread, the fencing thread and CPU write traps, and
 /// held for microseconds: std::recursive_mutex put a waiting thread to sleep at once, and its
 /// wake-up took longer than the critical section (title 1's GPU thread spent ~8% asleep there).
 class SpinRecursiveMutex {
 public:
+    /// `id_` names the lock in the profile's lock wait report (1 buffer cache, 2 texture cache).
+    constexpr explicit SpinRecursiveMutex(std::uint8_t id_ = 0) : id{id_} {}
+
     void lock() {
         const std::thread::id self = std::this_thread::get_id();
         if (owner.load(std::memory_order_relaxed) == self) {
@@ -73,6 +88,21 @@ private:
     }
 
     void LockContended() {
+        if (g_measure_spin_lock_waits) [[unlikely]] {
+            const auto start = std::chrono::steady_clock::now();
+            LockContendedImpl();
+            const auto index = id % t_spin_lock_waits.ns.size();
+            t_spin_lock_waits.ns[index] += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count());
+            ++t_spin_lock_waits.count[index];
+            return;
+        }
+        LockContendedImpl();
+    }
+
+    void LockContendedImpl() {
         for (int spin = 0; spin < SpinCount; ++spin) {
             Pause();
             if (state.load(std::memory_order_relaxed) == 0) {
@@ -93,6 +123,7 @@ private:
     std::atomic<std::uint32_t> state{0}; ///< 0 free, 1 held, 2 held with sleepers
     std::atomic<std::thread::id> owner{};
     std::uint32_t depth{}; ///< Recursion depth, touched only by the owner
+    std::uint8_t id{};     ///< Profile name (see the constructor)
 };
 
 } // namespace Common

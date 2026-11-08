@@ -380,7 +380,7 @@ public:
         } while (channel_state->has_deleted_buffers);
     }
 
-    Common::SpinRecursiveMutex mutex;
+    Common::SpinRecursiveMutex mutex{1}; ///< Profile lock id 1
     Runtime& runtime;
     bool any_buffer_uploaded = false;
 
