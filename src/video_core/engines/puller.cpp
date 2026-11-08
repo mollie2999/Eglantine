@@ -62,6 +62,27 @@ void DrainBack() {
     VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::Acquire);
 }
 
+// Reads a semaphore word for an acquire after only the queued work that may write it, when no GPU
+// work ever wrote its page (as the front's MME DMA reads do): the releases the front sent are
+// noted per page, compute and copy work is waited for whole. Ocarina of Time acquires ~4,600
+// times a second, and each full drain emptied the back's queue (~425 ms a second of the front).
+// A word that doesn't meet the acquire yet is read again after a full drain by the caller.
+// EDEN_NX2_ACQUIRE_EARLY=0 always drains first, as before.
+u32 ReadSemaphoreEarly(DmaPusher& dma_pusher, GPUVAddr address) {
+    static const bool early = [] {
+        const char* value = std::getenv("EDEN_NX2_ACQUIRE_EARLY");
+        return value == nullptr || value[0] != '0';
+    }();
+    auto& split = VideoCommon::GpuSplit::Get();
+    const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
+    if (early && split.Active() && device && !Tegra::Nx2IsGpuWritten(*device)) {
+        split.WaitForMemoryWrites(address, sizeof(u32), true, VideoCommon::DrainSite::Acquire);
+    } else {
+        DrainBack();
+    }
+    return ReadSemaphoreWord(dma_pusher, address);
+}
+
 // The fence manager records into the scheduler and downloads the CPU's writes over GPU data:
 // the back's state, which a drained back still uses from its idle hook (it submits).
 void ReleaseFences(DmaPusher& dma_pusher) {
@@ -91,8 +112,11 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     }
     // The release may still be queued for the split GPU thread's back half (and the caches
     // ReadSemaphoreWord asks are its state).
-    DrainBack();
-    const u32 current = ReadSemaphoreWord(dma_pusher, pending_acquire->address);
+    u32 current = ReadSemaphoreEarly(dma_pusher, pending_acquire->address);
+    if (!pending_acquire->Matches(current)) {
+        DrainBack();
+        current = ReadSemaphoreWord(dma_pusher, pending_acquire->address);
+    }
     if (Nx2SemaphoreWaiters::Get().Latched(this)) {
         if (static std::atomic<u32> rescued{};
             !pending_acquire->Matches(current) && rescued.fetch_add(1) < 64) {
@@ -251,6 +275,9 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             return;
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
+        if (acquire.Matches(ReadSemaphoreEarly(dma_pusher, acquire.address))) {
+            return;
+        }
         DrainBack();
         if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             return;
