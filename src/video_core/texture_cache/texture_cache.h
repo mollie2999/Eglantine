@@ -1859,6 +1859,21 @@ bool TextureCache<P>::UploadZeroMemory(Image& image) {
         }
         const DAddr begin = image.cpu_addr;
         const DAddr end = begin + image.guest_size_bytes;
+        // A few words spread over the image first: an image with data nearly anywhere is told
+        // apart without reading most of it.
+        constexpr u64 Probes = 64;
+        const u64 probe_step = Common::AlignDown(image.guest_size_bytes / Probes, sizeof(u64));
+        for (u64 probe = 0; probe_step != 0 && probe < Probes; ++probe) {
+            const u8* const bytes = device_memory.template GetPointer<u8>(begin + probe * probe_step);
+            if (bytes == nullptr) {
+                return false;
+            }
+            u64 word;
+            std::memcpy(&word, bytes, sizeof(word));
+            if (word != 0) {
+                return false;
+            }
+        }
         for (DAddr page = begin; page < end;) {
             const DAddr page_end =
                 (std::min<DAddr>)(Common::AlignDown(page, Core::DEVICE_PAGESIZE) +
