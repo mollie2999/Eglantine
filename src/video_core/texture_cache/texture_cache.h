@@ -928,6 +928,17 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
         return id ? &slot_image_views[id] : nullptr;
     });
     ImageView* const depth_buffer = key.depth_buffer_id ? &slot_image_views[key.depth_buffer_id] : nullptr;
+    const auto note_view = [this](ImageViewId id) {
+        if (!id) {
+            return;
+        }
+        if (id.index >= framebuffer_views.size()) {
+            framebuffer_views.resize(static_cast<size_t>(id.index) + 1);
+        }
+        framebuffer_views[id.index] = true;
+    };
+    std::ranges::for_each(key.color_buffer_ids, note_view);
+    note_view(key.depth_buffer_id);
     runtime.FlushDeferredClear();
     framebuffer_id = slot_framebuffers.insert(runtime, color_buffers, depth_buffer, key);
     return framebuffer_id;
@@ -3679,6 +3690,19 @@ void TextureCache<P>::RemoveImageViewReferences(std::span<const ImageViewId> rem
 template <class P>
 void TextureCache<P>::RemoveFramebuffers(std::span<const ImageViewId> removed_views) {
     runtime.FlushDeferredClear();
+    // Most deleted views (textures) never were a framebuffer's attachment: then no framebuffer
+    // holds them and the walk over every framebuffer is skipped. The views are being deleted, so
+    // their slots start over unmarked.
+    bool any_framebuffer_view = false;
+    for (const ImageViewId id : removed_views) {
+        if (id && id.index < framebuffer_views.size() && framebuffer_views[id.index]) {
+            framebuffer_views[id.index] = false;
+            any_framebuffer_view = true;
+        }
+    }
+    if (!any_framebuffer_view) {
+        return;
+    }
     auto it = framebuffers.begin();
     while (it != framebuffers.end()) {
         if (it->first.Contains(removed_views)) {

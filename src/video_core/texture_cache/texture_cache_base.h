@@ -146,6 +146,9 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     std::vector<u8> astc_scan_buffer;
     u64 images_deleted{};
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
+    /// Per image view slot: whether a framebuffer was ever made with it (RemoveFramebuffers
+    /// skips its walk over every framebuffer for views that never were).
+    std::vector<bool> framebuffer_views;
     /// Debug statistics: uploads from guest memory per image shape (count, bytes).
     std::map<u64, std::pair<u32, u64>> uploaded_shapes;
     bool debug_stats{true}; ///< Collect what only the debug statistics lines use
