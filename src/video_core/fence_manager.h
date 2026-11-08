@@ -105,8 +105,9 @@ public:
                 uncommitted_operations.emplace_back(std::move(func));
             }
             pending_operations.emplace_back(std::move(uncommitted_operations));
-            uncommitted_operations.clear(); // moved-from: make it empty explicitly
-            uncommitted_operations.reserve(64);
+            // Moved-from: make it empty explicitly. No reserve: most fences carry no operation,
+            // and reserving gave each of them a new allocation (thousands a second).
+            uncommitted_operations.clear();
         }
         pending_flushes.push_back(committed_flushes);
         QueueFence(new_fence);
