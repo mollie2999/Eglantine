@@ -72,6 +72,11 @@ public:
     [[nodiscard]] bool FrontMacros() const {
         return front_macros;
     }
+    /// Whether a small entry on a page not marked GPU-written waits for the queued compute and
+    /// copy work first (DmaPusher::Step). EDEN_NX2_SMALL_ENTRY_WAIT=0/1 forces it.
+    [[nodiscard]] bool SmallEntryWriterWait() const {
+        return small_entry_writer_wait;
+    }
 
     /// Whether the calling thread is the back.
     [[nodiscard]] static bool OnBackThread() {
@@ -288,6 +293,7 @@ private:
     Core::System* system{};
     bool active{};
     bool front_macros{};
+    bool small_entry_writer_wait{true};
     std::unique_ptr<u64[]> ring;
 
     // Front side.

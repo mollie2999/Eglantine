@@ -219,6 +219,7 @@ bool DmaPusher::Step() {
                               (Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh() : Settings::IsDMALevelSafe());
         if (header.size <= 8 && command_resume_offset == 0 && !gpu_written &&
             VideoCommon::GpuSplit::Get().Active() &&
+            VideoCommon::GpuSplit::Get().SmallEntryWriterWait() &&
             VideoCommon::GpuSplit::Get().WaitForWriters()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));

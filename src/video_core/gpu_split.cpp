@@ -126,6 +126,23 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     if (mode == '2' && raiders) {
         LOG_INFO(HW_GPU, "GPU thread split: using back-thread macros for Splatoon Raiders");
     }
+    // Small entries on pages not marked GPU-written wait for the queued compute and copy work
+    // before they are read only in Hyrule Warriors: Age of Imprisonment, whose dispatches fill
+    // fresh draw argument blocks (9e330271ef). Elsewhere the wait only stalls the front: in
+    // Ocarina of Time ~900 a second took ~75% of it. The title is matched by its program ID
+    // and, in case that ID is wrong, by its name.
+    constexpr u64 AgeOfImprisonmentProgramId = 0x04003F40232DE000ULL;
+    if (const char* value = std::getenv("EDEN_NX2_SMALL_ENTRY_WAIT")) {
+        small_entry_writer_wait = value[0] != '0';
+    } else {
+        std::string name;
+        (void)system_.GetGameName(name);
+        small_entry_writer_wait =
+            system_.GetApplicationProcessProgramID() == AgeOfImprisonmentProgramId ||
+            name.find("Age of Imprisonment") != std::string::npos;
+    }
+    LOG_INFO(HW_GPU, "GPU thread split: small entries {} for queued writers",
+             small_entry_writer_wait ? "wait" : "don't wait");
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
              front_macros ? ", macros on the first" : "");
 }
