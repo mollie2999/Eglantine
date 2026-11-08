@@ -428,9 +428,11 @@ void TextureCache<P>::TickFrame() {
                  images_created, images_deleted, gc_deletes + gc_costly_deletes, gc_costly_deletes,
                  gc_download_deletes,
                  async_decodes_queued, astc_opaque_images, astc_alpha_images);
-        LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} uploads from guest memory, {} MiB (largest {} MiB, {} by layer)",
-                 images_uploaded, uploaded_bytes >> 20, largest_upload >> 20, layer_uploads);
+        LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} uploads from guest memory, {} MiB (largest {} MiB, {} by layer), {} all-zero images cleared instead",
+                 images_uploaded, uploaded_bytes >> 20, largest_upload >> 20, layer_uploads,
+                 images_zero_filled);
         images_uploaded = uploaded_bytes = largest_upload = layer_uploads = 0;
+        images_zero_filled = 0;
         astc_opaque_images = astc_alpha_images = 0;
         std::vector<std::pair<u32, u64>> shapes;
         for (const auto& [key, value] : created_shapes) shapes.emplace_back(value.first, key);
@@ -1755,6 +1757,9 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         QueueAsyncDecode(image, image_id);
         return;
     }
+    if (UploadZeroMemory(image)) {
+        return;
+    }
 
     const bool gpu_unswizzle_enabled = Settings::values.gpu_unswizzle_enabled.GetValue();
 
@@ -1791,6 +1796,67 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         } else {
             uploaded_ranges.emplace_back(image.cpu_addr, image.guest_size_bytes);
         }
+    }
+}
+
+template <class P>
+bool TextureCache<P>::UploadZeroMemory(Image& image) {
+    // New render targets are often uploaded from guest memory the GPU only ever rendered to, which
+    // still holds zeros (Splatoon Raiders re-creates its depth and HDR targets each frame with
+    // dynamic resolution: ~450 ms a second of CPU unswizzling on the GPU thread). All-zero bytes
+    // unswizzle to all-zero texels, so a GPU clear to zero gives the same contents. The scan stops
+    // at the first non-zero byte. Compressed and converted formats are left to the upload (zero
+    // blocks need not decode to zero texels). EDEN_NX2_ZERO_UPLOAD=0 turns it off.
+    if constexpr (requires { image.ClearToZero(); }) {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_ZERO_UPLOAD");
+            return value == nullptr || value[0] != '0';
+        }();
+        constexpr u64 MinBytes = 256_KiB;
+        constexpr ImageFlagBits excluded =
+            ImageFlagBits::Sparse | ImageFlagBits::Converted | ImageFlagBits::AcceleratedUpload |
+            ImageFlagBits::Unbacked | ImageFlagBits::TrimmedLevels | ImageFlagBits::Rescaled;
+        if (!enabled || True(image.flags & excluded) || image.info.num_samples != 1 ||
+            image.info.type == ImageType::Linear || image.info.type == ImageType::Buffer ||
+            image.guest_size_bytes < MinBytes || image.cpu_addr == 0 ||
+            VideoCore::Surface::IsPixelFormatASTC(image.info.format) ||
+            VideoCore::Surface::IsPixelFormatBCn(image.info.format)) {
+            return false;
+        }
+        const DAddr begin = image.cpu_addr;
+        const DAddr end = begin + image.guest_size_bytes;
+        for (DAddr page = begin; page < end;) {
+            const DAddr page_end =
+                (std::min<DAddr>)(Common::AlignDown(page, Core::DEVICE_PAGESIZE) +
+                                      Core::DEVICE_PAGESIZE,
+                                  end);
+            const u8* const bytes = device_memory.template GetPointer<u8>(page);
+            if (bytes == nullptr) {
+                return false;
+            }
+            const size_t size = static_cast<size_t>(page_end - page);
+            size_t offset = 0;
+            for (; offset + sizeof(u64) <= size; offset += sizeof(u64)) {
+                u64 word;
+                std::memcpy(&word, bytes + offset, sizeof(word));
+                if (word != 0) {
+                    return false;
+                }
+            }
+            for (; offset < size; ++offset) {
+                if (bytes[offset] != 0) {
+                    return false;
+                }
+            }
+            page = page_end;
+        }
+        if (!image.ClearToZero()) {
+            return false;
+        }
+        ++images_zero_filled;
+        return true;
+    } else {
+        return false;
     }
 }
 

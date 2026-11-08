@@ -548,6 +548,11 @@ public:
     /// gets memory of its own, all cleared (the caller loads the data again). False on failure.
     bool BackTilesWhole();
 
+    /// Fills every level and layer with zero bytes on the GPU, as an upload of all-zero guest
+    /// memory would. False (nothing recorded) for images it doesn't handle: multisampled or
+    /// rescaled ones.
+    bool ClearToZero();
+
     /// Device memory BindLayers has bound to the image's layers (an unbacked image has no other).
     u64 SparseBoundBytes() const noexcept {
         return sparse_layers.bound_bytes;
