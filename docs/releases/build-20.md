@@ -31,4 +31,22 @@ Measured by the tester on Linux in Ocarina of Time:
 
 - "Wait for each of Ocarina of Time's frames" (`a23be213d5`) is still not part of this build: it costs over 8 ms a frame and does not fully fix the flickering.
 
-Thanks to Kaj, Frysix, ne1i, Zortos, zortos293, Frizti, Duck912 and the Lichii and Eglantine contributors for the ported fixes, and to Jojo for the Ocarina of Time work this build continues from.
+## Credits
+
+These changes were taken from other forks; each keeps its original author in the commit history.
+
+| Change | Author | Source | Commit in this build |
+| --- | --- | --- | --- |
+| Pause, don't reset, the occlusion counter at each submission (Ocarina white flashes) | Kaj | Eglantine nx2-experimental `226f92afdb` (Lichii #121) | `f988013428` |
+| Re-upload native 64 KiB uniform banks (stale per-draw data, white flashes) | kraibse | Eglantine nx2-experimental `031e07436c`, `8b3aff59e4`, `87bd90ae35` | `f36f4c85ee` (port) |
+| Retry native lowering with an aligned high uniform base; shadow SHF and LOP3 forms | Frysix | Lichii `f2960358b8` (#241) | `aab66d5688` |
+| Skip the upload of a new render target a clear overwrites whole | Kaj | Eglantine nx2-experimental `7d26d3b2fb` (#141) | `a986cdaca4` |
+| Match the clear-skip check to the clear's real coverage | Kaj | Lichii `aa0acb3ede` (#311) | `7713c19d87` |
+| Poll suspended channels every 50 µs instead of every 1 ms | ne1i | Lichii `acb9c18d65` (#446) | `02207d2356` (port) |
+| Don't wait for the GPU to grow the quad index buffer | Hydro74000, via Zortos and Frizti | Hydro74000/Edlws `034668a14e`, Lichii `0a619eaaa7` (#414) | `98feca6c10` |
+| Batch GPU-written page marks by bitmap word | zortos293 | Eglantine nx2-experimental `abb9ae8426` (Lichii #178) | `e1dca23889` |
+| Reuse the selected graphics pipeline for draw state | Frizti | Frizti/Lichii `23f40d5d81` (Lichii #412) | `4b46c5f0a3` |
+
+Written for this fork: re-uploading only the changed bank pages (`947679ac66`) and the per-thread GPU page translation cache (`905e1224bd`).
+
+Thanks to everyone above, to the Lichii and Eglantine contributors, and to Jojo for the Ocarina of Time work this build continues from.
