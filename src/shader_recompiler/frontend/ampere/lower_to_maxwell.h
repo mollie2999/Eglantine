@@ -112,6 +112,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
     std::vector<u32> bounded_links(code.size(), ~0U), direct_targets(code.size(), ~0U);
     std::vector<std::pair<u32, u32>> control_edges;
     bool bounded_control = !geometry_stage;
+    // Every control transfer is a direct branch, call or return with a valid target, so
+    // control_entries holds every instruction that can be jumped to (no computed branches).
+    bool direct_control_only = !geometry_stage;
     control_entries[0] = true;
     const auto write_count = [](const Instruction& instruction) -> std::optional<u32> {
         switch (instruction.Bits(0, 12)) {
@@ -164,6 +167,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const s64 target = s64{index} * 16 + 16 + relative;
             if (target < 0 || target % 16 || static_cast<u64>(target / 16) >= code.size()) {
                 bounded_control = false;
+                direct_control_only = false;
             } else {
                 direct_targets[index] = static_cast<u32>(target / 16);
                 control_entries[direct_targets[index]] = true;
@@ -177,6 +181,40 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                    opcode != 0x941 && opcode != 0x942 && opcode != 0x948 &&
                    opcode != 0x348 && opcode != 0x94d && opcode != 0x950 && opcode != 0x95b) {
             bounded_control = false;
+            direct_control_only = false;
+        }
+    }
+    // A call whose return-PC move the compiler scheduled a few instructions before it (Ocarina of
+    // Time's hedge culling compute program): the MOV Rlink, return_pc found going back through
+    // straight-line code that never writes Rlink, with no instruction in between that anything
+    // jumps to. The same search as the bounded analysis below, for one call at a time, so it
+    // applies when that whole-program analysis doesn't.
+    std::vector<u32> scheduled_links(code.size(), ~0U);
+    for (u32 index = 1; direct_control_only && index < code.size(); ++index) {
+        if (code[index].words[0] != 0x7944 || (code[index].words[2] & ~0x3ffffU) != 0x03c00000) {
+            continue;
+        }
+        std::array<bool, 256> overwritten{};
+        for (u32 prior = index; prior-- > 0;) {
+            if (control_entries[prior + 1]) {
+                break; // a jump to the call or to code before it would skip this instruction
+            }
+            const auto& instruction = code[prior];
+            const u32 destination = instruction.Bits(16, 8);
+            if ((instruction.words[0] & ~0x00ff0000U) == 0x00007802 &&
+                instruction.words[1] == (index + 1) * 16 && instruction.words[2] == 0xf00 &&
+                !(instruction.words[3] & 0xc00001ffU) && ordinary_operands(instruction) &&
+                destination < 246 && !overwritten[destination]) {
+                scheduled_links[index] = destination;
+                break;
+            }
+            const auto count = write_count(instruction);
+            if (!count || !ordinary_operands(instruction) || destination + *count > 255) {
+                break;
+            }
+            for (u32 component = 0; component < *count; ++component) {
+                overwritten[destination + component] = true;
+            }
         }
     }
     for (u32 index = 1; bounded_control && index < code.size(); ++index) {
@@ -3772,14 +3810,18 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 code[index - 1].Bits(16, 8) < 250 &&
                 code[index - 1].words[1] == (index + 1) * 16 &&
                 code[index - 1].words[2] == 0xf00;
+            const bool scheduled = !adjacent && !bounded_control && scheduled_links[index] != ~0U;
             if (index == 0 || insn.words[0] != 0x7944 ||
-                (insn.words[2] & ~0x3ffffU) != 0x03c00000 || (!adjacent && !bounded_control))
+                (insn.words[2] & ~0x3ffffU) != 0x03c00000 ||
+                (!adjacent && !bounded_control && !scheduled))
                 return fail(index, "native call linkage mode");
             const u64 raw = insn.words[1] | (u64{insn.words[2] & 0x3ffff} << 32);
             const s64 relative = static_cast<s64>(raw << 14) >> 14;
             const s64 target = s64{index} * 16 + 16 + relative;
             if (target < 0 || target % 16) return fail(index, "native call destination alignment");
-            const u32 link = adjacent ? code[index - 1].Bits(16, 8) : bounded_links[index];
+            const u32 link = adjacent ? code[index - 1].Bits(16, 8)
+                             : scheduled ? scheduled_links[index]
+                                         : bounded_links[index];
             for (size_t call = 0; call < call_targets.size(); ++call) {
                 if (call_targets[call] == target / 16 && call_links[call] != link)
                     return fail(index, "native inconsistent call linkage");
