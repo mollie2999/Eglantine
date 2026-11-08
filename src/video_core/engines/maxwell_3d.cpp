@@ -971,6 +971,7 @@ GuestWrite FrontGuestWrite(const Maxwell3D::Regs& regs, u32 method, u32 amount) 
 void NoteGuestWrite(VideoCommon::GpuSplit& split, const GuestWrite& write) {
     if (write.unknown) {
         split.NoteUnknownWrite();
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::UnknownWrites3D, 1);
     } else if (write.size != 0) {
         split.NoteMemoryWrite(write.address, write.size);
     }
@@ -1343,8 +1344,10 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     if (selective) {
         split.WaitForMemoryWrites(source, read_bytes, wait.mode == 1,
                                   VideoCommon::DrainSite::MacroDmaRead);
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadsSelective, 1);
     } else {
         split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadsDrained, 1);
     }
     if (VideoCommon::Nx2Profile::Enabled()) {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);

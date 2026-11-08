@@ -500,6 +500,8 @@ void DmaPusher::CallMethod(u32 argument) {
                 split.NoteWriter();
             } else if (may_write) {
                 split.NoteUnknownWrite();
+                VideoCommon::Nx2Profile::Add(
+                    VideoCommon::Nx2Profile::Counter::UnknownWritesEngines, 1);
             }
         };
         if (split.Active()) {
@@ -565,6 +567,8 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
                 split.NoteWriter();
             } else if (may_write) {
                 split.NoteUnknownWrite();
+                VideoCommon::Nx2Profile::Add(
+                    VideoCommon::Nx2Profile::Counter::UnknownWritesEngines, 1);
             }
         };
         if (split.Active()) {
