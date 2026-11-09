@@ -2723,8 +2723,29 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             // it (Ocarina of Time's grass instances lie 12-18 MiB past theirs): bound to the end of
             // its mapping, up to 64 MiB. The 8 MiB cap made those reads return 0 and culled every
             // blade. Written pools keep the cap: a write marks the whole binding GPU-modified.
+            // Ocarina's lighting passes (probe gather c73574a9766531cb, froxel lighting
+            // 75d4369f3b1f5868 and two more) read one pool past 64 MiB once streaming has filled
+            // it, so after a long ride objects lit from its later entries read 0 and turn black.
+            // EDEN_NX2_TABLE_POOL_MIB sets the cap (64 restores the old one).
+            static const u32 table_pool_cap = [] {
+                const char* value = std::getenv("EDEN_NX2_TABLE_POOL_MIB");
+                const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 256;
+                return static_cast<u32>((std::clamp<u64>)(mib, 8, 2048) << 20);
+            }();
             if (table_pointer && !is_written) {
-                return (std::min)(memory_layout_size, static_cast<u32>(64_MiB));
+                if (memory_layout_size > 64_MiB) {
+                    static std::mutex log_mutex;
+                    static std::unordered_set<GPUVAddr> logged;
+                    std::scoped_lock log_lock{log_mutex};
+                    if (logged.size() < 64 && logged.insert(gpu_addr).second) {
+                        LOG_INFO(HW_GPU,
+                                 "Read-only object pool at {:#x}: mapping continues {} MiB, bound "
+                                 "{} MiB (was 64)",
+                                 gpu_addr, memory_layout_size >> 20,
+                                 (std::min)(memory_layout_size, table_pool_cap) >> 20);
+                    }
+                }
+                return (std::min)(memory_layout_size, table_pool_cap);
             }
             // A native (Switch 2) compute program's pointer is bare: the word after it is another
             // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it
