@@ -148,6 +148,7 @@ public:
     void FlushCommands();
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache();
+    void ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback);
     /// Signal the ending of command list.
     void OnCommandListEnd();
 
