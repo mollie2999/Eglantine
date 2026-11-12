@@ -2763,18 +2763,6 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                 return static_cast<u32>((std::clamp<u64>)(mib, 8, 2048) << 20);
             }();
             if (table_pointer && !is_written) {
-                if (memory_layout_size > 64_MiB) {
-                    static std::mutex log_mutex;
-                    static std::unordered_set<GPUVAddr> logged;
-                    std::scoped_lock log_lock{log_mutex};
-                    if (logged.size() < 64 && logged.insert(gpu_addr).second) {
-                        LOG_INFO(HW_GPU,
-                                 "Read-only object pool at {:#x}: mapping continues {} MiB, bound "
-                                 "{} MiB (was 64)",
-                                 gpu_addr, memory_layout_size >> 20,
-                                 (std::min)(memory_layout_size, table_pool_cap) >> 20);
-                    }
-                }
                 return (std::min)(memory_layout_size, table_pool_cap);
             }
             // A native (Switch 2) compute program's pointer is bare: the word after it is another
