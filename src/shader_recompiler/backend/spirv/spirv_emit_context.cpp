@@ -1030,17 +1030,35 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         if (info.native_global_bounds) {
             // Native pointers carry no NVN size word. The address belongs to the candidate buffer
             // whose base is the closest one at or below it (bounds come from the binding).
+            // Only a buffer whose bound range holds the address can serve it: with pointer-table
+            // entries bound too (64 bindings), a smaller buffer starting closer below the address
+            // took accesses past its end, and Ocarina of Time's tree instances read wrong records
+            // (duplicated trees floating above the hills). Without one, keep the closest base below.
             std::vector<Id> bases(num_buffers);
             Id best_index{Const(~0U)};
             Id best_distance{Constant(U64, ~u64{0})};
+            Id fallback_index{Const(~0U)};
+            Id fallback_distance{Constant(U64, ~u64{0})};
             for (size_t index = 0; index < num_buffers; ++index) {
                 bases[index] = base_address(index);
                 const Id distance{OpISub(U64, addr, bases[index])};
-                const Id better{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, bases[index]),
-                                             OpULessThan(U1, distance, best_distance))};
+                const Id at_or_above{OpUGreaterThanEqual(U1, addr, bases[index])};
+                const Id closer_any{
+                    OpLogicalAnd(U1, at_or_above, OpULessThan(U1, distance, fallback_distance))};
+                fallback_distance = OpSelect(U64, closer_any, distance, fallback_distance);
+                fallback_index =
+                    OpSelect(U32[1], closer_any, Const(static_cast<u32>(index)), fallback_index);
+                const Id bound_words{OpArrayLength(U32[1], ssbos[index].U32, 0U)};
+                const Id bound_bytes{OpIMul(U64, OpUConvert(U64, bound_words), Constant(U64, u64{4}))};
+                const Id inside{OpULessThan(U1, distance, bound_bytes)};
+                const Id better{OpLogicalAnd(
+                    U1, OpLogicalAnd(U1, at_or_above, inside),
+                    OpULessThan(U1, distance, best_distance))};
                 best_distance = OpSelect(U64, better, distance, best_distance);
                 best_index = OpSelect(U32[1], better, Const(static_cast<u32>(index)), best_index);
             }
+            best_index = OpSelect(U32[1], OpIEqual(U1, best_index, Const(~0U)), fallback_index,
+                                  best_index);
             if (LeanGlobalMemory()) {
                 std::vector<Sirit::Literal> literals;
                 std::vector<Id> labels;
