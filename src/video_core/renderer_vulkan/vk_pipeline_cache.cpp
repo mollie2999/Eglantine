@@ -923,13 +923,19 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             }
             std::scoped_lock lock{state.mutex};
             if (entry.pipeline) {
-                // A program has a record per area variant (see CurrentComputePipeline): keep the one
-                // that binds the fewest pointers as the base; the others are translated again when
-                // their slots are filled. A base binding another area's pointers can leave instance
-                // tables out where those pointers are null.
+                // A program has a record per area variant (see CurrentComputePipeline). The base is
+                // the one that binds the most pointer-table entries (Hyrule Field's ground grass is
+                // read through them), then the fewest direct pointers: an area's extra pointers
+                // (Castle Town's leaf lists) get their variant when filled, and binding them in the
+                // base leaves instance tables out elsewhere.
                 auto& slot{compute_cache[key]};
-                if (!slot.pipeline ||
-                    slot.pipeline->pointer_slots.size() > entry.pipeline->pointer_slots.size()) {
+                const auto better_base = [](const ComputePipeline& a, const ComputePipeline& b) {
+                    if (a.TableBindings() != b.TableBindings()) {
+                        return a.TableBindings() > b.TableBindings();
+                    }
+                    return a.pointer_slots.size() < b.pointer_slots.size();
+                };
+                if (!slot.pipeline || better_base(*entry.pipeline, *slot.pipeline)) {
                     if (slot.pipeline) {
                         retired_compute_pipelines.push_back(std::move(slot.pipeline));
                     }

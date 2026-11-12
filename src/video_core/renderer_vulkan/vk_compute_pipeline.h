@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -70,6 +71,13 @@ public:
     /// because they held null when this pipeline was built (rebuilt once one is filled).
     std::vector<u64> pointer_slots;
     std::vector<u64> null_pointer_slots;
+
+    /// Storage buffers bound through pointer-table entries (pointers loaded from memory).
+    [[nodiscard]] size_t TableBindings() const noexcept {
+        return static_cast<size_t>(std::count_if(
+            info.storage_buffers_descriptors.begin(), info.storage_buffers_descriptors.end(),
+            [](const auto& desc) { return desc.indirect_offset != ~0U; }));
+    }
     u32 pointer_rebuilds{};
 
     /// Storage images written by the last configured dispatch
