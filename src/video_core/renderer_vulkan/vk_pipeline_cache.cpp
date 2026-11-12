@@ -641,15 +641,20 @@ namespace {
 // <title>/vulkan_used.bin: graphics pipeline hashes used by this title. They are retained so a
 // previously visited area can be preloaded on a later launch rather than stuttering as its
 // pipelines are rebuilt on demand.
-constexpr u32 UsedPipelinesMagic = 0x31505545; // "EUP1"
+constexpr u32 UsedPipelinesMagic = 0x32505545; // "EUP2": ages advance once per session
+constexpr u32 UsedPipelinesMagicV1 = 0x31505545; // "EUP1": ages never advanced
+// EUP1 entries are as old as can be kept: one session that doesn't use them drops them.
+constexpr u8 UsedPipelinesV1Age = 15;
 std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path) {
     std::unordered_map<u64, u8> used;
     std::ifstream file{path, std::ios::binary};
     u32 magic{}, count{};
-    if (!file.read(reinterpret_cast<char*>(&magic), sizeof(magic)) || magic != UsedPipelinesMagic ||
+    if (!file.read(reinterpret_cast<char*>(&magic), sizeof(magic)) ||
+        (magic != UsedPipelinesMagic && magic != UsedPipelinesMagicV1) ||
         !file.read(reinterpret_cast<char*>(&count), sizeof(count))) {
         return used;
     }
+    const bool v1 = magic == UsedPipelinesMagicV1;
     used.reserve(count);
     for (u32 i = 0; i < count; ++i) {
         u64 hash{};
@@ -658,7 +663,7 @@ std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path)
             !file.read(reinterpret_cast<char*>(&age), sizeof(age))) {
             break;
         }
-        used.emplace(hash, age);
+        used.emplace(hash, v1 ? UsedPipelinesV1Age : age);
     }
     return used;
 }
@@ -679,6 +684,18 @@ bool BackgroundPipelinesEnabled() {
         return value == nullptr || value[0] != '0';
     }();
     return enabled;
+}
+
+// With a list of what recent sessions used, the cached pipelines outside it are built when first
+// needed instead of in the background: each built pipeline holds driver memory, and building every
+// record a long-lived cache holds (~26k for Ocarina of Time) took several GiB.
+// EDEN_NX2_BACKGROUND_PIPELINES=2 builds them in the background anyway.
+bool BackgroundBuildUnlisted() {
+    static const bool all = [] {
+        const char* value = std::getenv("EDEN_NX2_BACKGROUND_PIPELINES");
+        return value != nullptr && value[0] == '2';
+    }();
+    return all;
 }
 
 size_t BackgroundPipelineThreads() {
@@ -806,6 +823,18 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     pipeline_cache_filename = VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION);
     used_pipelines_filename = VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION);
     used_pipelines = LoadUsedPipelines(used_pipelines_filename);
+    // One more session since each entry was last used. Ages were never advanced, so the list only
+    // grew: after many sessions Ocarina of Time preloaded ~24k pipelines (~4.5 min at boot, several
+    // GiB of driver memory). Keep what the last UsedPipelinesMaxSessions sessions used (#161).
+    {
+        constexpr u8 UsedPipelinesMaxSessions = 16;
+        const size_t before = used_pipelines.size();
+        std::erase_if(used_pipelines, [](auto& entry) {
+            return ++entry.second > UsedPipelinesMaxSessions;
+        });
+        LOG_INFO(Render_Vulkan, "Used pipeline list: {} kept, {} not used in {} sessions dropped",
+                 used_pipelines.size(), before - used_pipelines.size(), UsedPipelinesMaxSessions);
+    }
     used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
     size_t queued_graphics = 0;
@@ -885,7 +914,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
                                     : !used_pipelines.contains(hash))) {
             ++skipped_pipelines;
-            if (BackgroundPipelinesEnabled()) {
+            if (BackgroundPipelinesEnabled() && (used_pipelines.empty() || BackgroundBuildUnlisted())) {
                 deferred_graphics.emplace_back(key, std::move(envs));
             }
             return;
