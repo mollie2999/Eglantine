@@ -189,6 +189,11 @@ private:
     /// (used_pipelines) are built at boot; the rest are built when first needed, and not stored
     /// again. Each built pipeline holds driver memory (title 1: 6.5k cached, a quarter used).
     std::unordered_set<u64> disk_pipelines;
+    /// Disk records whose pipeline failed to build at boot (the record lacks an answer the current
+    /// translator asks for). Stored again once built from the live environment: otherwise the
+    /// record fails every boot and the pipeline is built on the GPU thread every session.
+    std::unordered_set<u64> failed_disk_pipelines;
+    std::mutex failed_disk_mutex;
     std::unordered_map<u64, u8> used_pipelines; ///< Key hashes retained for later preloading
     std::unordered_set<const GraphicsPipeline*> used_this_session;
     std::filesystem::path used_pipelines_filename;

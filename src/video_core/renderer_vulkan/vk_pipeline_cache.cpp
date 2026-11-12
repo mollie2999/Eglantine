@@ -901,6 +901,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             auto pipeline{CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs),
                                                  state.statistics.get(), false)};
 
+            if (!pipeline) {
+                std::scoped_lock failed_lock{failed_disk_mutex};
+                failed_disk_pipelines.insert(key.Hash());
+            }
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
                 graphics_cache.emplace(key, std::move(pipeline));
@@ -954,6 +958,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                         env_ptrs.push_back(&env);
                     }
                     pipeline = CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), nullptr, false);
+                    if (!pipeline) {
+                        std::scoped_lock failed_lock{failed_disk_mutex};
+                        failed_disk_pipelines.insert(key.Hash());
+                    }
                 }
                 std::unique_lock lock{background_mutex};
                 if (pipeline && !background_claimed.contains(key)) {
@@ -1377,9 +1385,18 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
         return pipeline;
     }
     if (disk_pipelines.contains(graphics_key.Hash())) {
-        // In the disk cache already, only not built at boot.
-        QueueVulkanPipelineCacheFlush();
-        return pipeline;
+        bool stale_record;
+        {
+            std::scoped_lock failed_lock{failed_disk_mutex};
+            stale_record = failed_disk_pipelines.erase(graphics_key.Hash()) != 0;
+        }
+        if (!stale_record) {
+            // In the disk cache already, only not built at boot.
+            QueueVulkanPipelineCacheFlush();
+            return pipeline;
+        }
+        // Its record could not be built at boot: store the live environment after it. The loader
+        // keeps the first record of a key that builds, so the next boot builds this one.
     }
     disk_pipelines.insert(graphics_key.Hash());
     serialization_thread.QueueWork([this, key = graphics_key, envs = std::move(environments.envs)] {
