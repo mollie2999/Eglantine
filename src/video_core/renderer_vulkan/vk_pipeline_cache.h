@@ -109,6 +109,10 @@ struct ShaderPools {
 struct ComputePipelineCacheEntry {
     std::unique_ptr<ComputePipeline> pipeline;
     std::string failure;
+    /// Translations of the same program for dispatches where some of the pointer slots that were
+    /// null when `pipeline` was translated hold buffers, keyed by which of them do (bit i: slot i of
+    /// pipeline->null_pointer_slots). A null entry is a variant that failed to build.
+    std::vector<std::pair<u64, std::unique_ptr<ComputePipeline>>> variants;
 
     [[nodiscard]] ComputePipeline* Get(bool native, GPUVAddr address,
                                        const ComputePipelineCacheKey& key) const;
@@ -148,7 +152,9 @@ private:
                                                      const ComputePipeline* previous = nullptr);
 
     /// Whether a pointer slot the pipeline left out because it was null now holds a mapped address.
-    bool NullPointerSlotFilled(const ComputePipeline& pipeline) const;
+    /// Which of the pointer slots `pipeline` left out because they were null hold a mapped buffer
+    /// now (bit i: pipeline.null_pointer_slots[i]).
+    u64 FilledNullPointerSlots(const ComputePipeline& pipeline) const;
 
     ComputePipelineCacheEntry CreateComputePipeline(ShaderPools& pools,
                                                      const ComputePipelineCacheKey& key,

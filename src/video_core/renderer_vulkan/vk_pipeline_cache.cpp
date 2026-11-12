@@ -796,32 +796,44 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
     auto& entry{pair->second};
     if (is_new) {
         entry = CreateComputePipeline(key, shader);
-    } else if (entry.pipeline && !entry.pipeline->null_pointer_slots.empty() &&
-               entry.pipeline->pointer_rebuilds < 4 && NullPointerSlotFilled(*entry.pipeline)) {
-        // A native program translated while one of its pointer slots was null (a buffer the game
-        // hadn't allocated yet) has no binding for it, and the disk cache keeps that version for
-        // later sessions: Ocarina of Time's bush leaves never appeared in Castle Town. Rebuild it
-        // once the slot holds a buffer.
-        auto rebuilt{CreateComputePipeline(key, shader, entry.pipeline.get())};
-        if (rebuilt.pipeline) {
-            LOG_INFO(Render_Vulkan,
-                     "Compute pipeline {:016x} rebuilt: a pointer slot null at its translation "
-                     "now holds a buffer ({} pointer slots, {} still null)",
-                     key.unique_hash, rebuilt.pipeline->pointer_slots.size(),
-                     rebuilt.pipeline->null_pointer_slots.size());
-            retired_compute_pipelines.push_back(std::move(entry.pipeline));
-            entry = std::move(rebuilt);
-        } else {
-            entry.pipeline->null_pointer_slots.clear();
+    } else if (entry.pipeline && !entry.pipeline->null_pointer_slots.empty()) {
+        // A native program translated while some of its pointer slots were null (buffers the game
+        // hadn't allocated there) has no binding for them: Ocarina of Time's foliage culling, first
+        // translated outside Castle Town, never wrote the near bush and hedge leaf lists, and the
+        // bushes stayed bare twigs up close. Which slots the game fills depends on the area, and a
+        // stage binds at most 32 buffers: a translation that also binds the leaf lists leaves the
+        // per-type instance tables of other areas out (their grass is culled whole). So the
+        // translation is not replaced: dispatches with those slots filled use a variant translated
+        // for them, the others keep the original.
+        const u64 filled = FilledNullPointerSlots(*entry.pipeline);
+        if (filled != 0) {
+            constexpr size_t MaxComputeVariants = 4;
+            auto it = std::ranges::find_if(entry.variants,
+                                           [filled](const auto& variant) { return variant.first == filled; });
+            if (it == entry.variants.end() && entry.variants.size() < MaxComputeVariants) {
+                auto built{CreateComputePipeline(key, shader, nullptr)};
+                LOG_INFO(Render_Vulkan,
+                         "Compute pipeline {:016x}: variant for filled pointer slots {:#x} {} "
+                         "({} pointer slots)",
+                         key.unique_hash, filled, built.pipeline ? "built" : "failed",
+                         built.pipeline ? built.pipeline->pointer_slots.size() : 0);
+                entry.variants.emplace_back(filled, std::move(built.pipeline));
+                it = std::prev(entry.variants.end());
+            }
+            if (it != entry.variants.end() && it->second) {
+                return it->second.get();
+            }
         }
     }
     return entry.Get(kepler_compute->IsNativeMode(),
                      kepler_compute->regs.code_loc.Address() + qmd.program_start, key);
 }
 
-bool PipelineCache::NullPointerSlotFilled(const ComputePipeline& pipeline) const {
+u64 PipelineCache::FilledNullPointerSlots(const ComputePipeline& pipeline) const {
     const auto& qmd{kepler_compute->launch_description};
-    for (const u64 slot : pipeline.null_pointer_slots) {
+    u64 filled = 0;
+    for (size_t i = 0; i < pipeline.null_pointer_slots.size() && i < 64; ++i) {
+        const u64 slot = pipeline.null_pointer_slots[i];
         const u32 index = static_cast<u32>(slot >> 32);
         const u32 offset = static_cast<u32>(slot);
         if (index >= qmd.const_buffer_config.size() ||
@@ -835,10 +847,10 @@ bool PipelineCache::NullPointerSlotFilled(const ComputePipeline& pipeline) const
         const GPUVAddr address = gpu_memory->Read<u64>(cbuf.Address() + offset);
         if (address != 0 && gpu_memory->IsWithinGPUAddressRange(address) &&
             gpu_memory->IsFullyMappedRange(address, 1)) {
-            return true;
+            filled |= u64{1} << i;
         }
     }
-    return false;
+    return filled;
 }
 
 void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
@@ -911,11 +923,16 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             }
             std::scoped_lock lock{state.mutex};
             if (entry.pipeline) {
-                // A program rebuilt for a filled pointer slot has a second record: keep the one
-                // that binds more pointers.
+                // A program has a record per area variant (see CurrentComputePipeline): keep the one
+                // that binds the fewest pointers as the base; the others are translated again when
+                // their slots are filled. A base binding another area's pointers can leave instance
+                // tables out where those pointers are null.
                 auto& slot{compute_cache[key]};
                 if (!slot.pipeline ||
-                    slot.pipeline->pointer_slots.size() < entry.pipeline->pointer_slots.size()) {
+                    slot.pipeline->pointer_slots.size() > entry.pipeline->pointer_slots.size()) {
+                    if (slot.pipeline) {
+                        retired_compute_pipelines.push_back(std::move(slot.pipeline));
+                    }
                     slot = std::move(entry);
                 }
             }
