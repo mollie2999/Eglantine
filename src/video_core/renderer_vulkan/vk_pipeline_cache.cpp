@@ -812,11 +812,24 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
                                            [filled](const auto& variant) { return variant.first == filled; });
             if (it == entry.variants.end() && entry.variants.size() < MaxComputeVariants) {
                 auto built{CreateComputePipeline(key, shader, nullptr)};
+                const size_t base_tables = entry.pipeline->TableBindings();
+                const size_t tables = built.pipeline ? built.pipeline->TableBindings() : 0;
+                // A variant that binds fewer pointer-table entries than the base pays for the
+                // filled slots with instance tables: Hyrule Field fills more slots than the base
+                // binds, and a variant binding them all left out the tables its ground grass is read
+                // through. Keep the base for such a dispatch.
+                const bool keep = built.pipeline && tables >= base_tables;
                 LOG_INFO(Render_Vulkan,
                          "Compute pipeline {:016x}: variant for filled pointer slots {:#x} {} "
-                         "({} pointer slots)",
-                         key.unique_hash, filled, built.pipeline ? "built" : "failed",
-                         built.pipeline ? built.pipeline->pointer_slots.size() : 0);
+                         "({} pointer slots, {} table entries, base {})",
+                         key.unique_hash, filled,
+                         !built.pipeline ? "failed" : keep ? "built" : "not used",
+                         built.pipeline ? built.pipeline->pointer_slots.size() : 0, tables,
+                         base_tables);
+                if (built.pipeline && !keep) {
+                    // Its build may still run on a worker: retire it like a replaced pipeline.
+                    retired_compute_pipelines.push_back(std::move(built.pipeline));
+                }
                 entry.variants.emplace_back(filled, std::move(built.pipeline));
                 it = std::prev(entry.variants.end());
             }
