@@ -1582,6 +1582,14 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
     }
     {
         std::scoped_lock lock{buffer_cache.mutex};
+        // As OnCacheInvalidations: out of the GPU-written ranges first. Applying one write
+        // downloads the GPU's bytes elsewhere on its pages, which would write over a later range
+        // on the same page that is still marked GPU-modified.
+        boost::container::small_vector<std::pair<DAddr, u64>, 16> claimed;
+        for (const auto& [addr, size] : sequences) {
+            claimed.emplace_back(addr, size);
+        }
+        buffer_cache.ClaimCpuWrites(claimed);
         for (const auto& [addr, size] : sequences) {
             buffer_cache.WriteMemory(addr, size);
         }
